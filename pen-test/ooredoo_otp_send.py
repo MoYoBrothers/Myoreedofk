@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
- My Ooredoo (Algeria) v1.5.17 — OTP LOGIN + SESSION CLIENT  [v4 — session]
+ My Ooredoo (Algeria) v1.5.17 — OTP LOGIN + SESSION CLIENT  [v5 — power-snake]
 ===============================================================================
  Target app   : My Ooredoo — com.algeria.selfcare.app.android v1.5.17 (1461)
  Source       : static reverse-engineering of 'My Ooredoo_1.5.17.apks'
@@ -20,6 +20,22 @@
    ApiCalls::setChecksumHeaders   @ 0x92ab94  -> x-signature
    ApiCalls::setDeviceDataGatherForKeycloak @ 0x95c568 -> X-Platform-Info
    ApiCalls::setDeviceFingerprintHeader     @ 0x92a480 -> X-Device-Fingerprint
+
+ POWER OF SNAKE (v5 — gamification module reconstructed):
+   RemotePowerSnakeApi::getPowerSnakes   @ 0xde9bfc -> GET  …/gamification/power-snake?status=AVAILABLE
+   RemotePowerSnakeApi::unlockPowerSnake @ 0xdf4388 -> POST …/gamification/power-snake/<uuid>/redeem
+       (POST with data:null — ZERO body bytes; module Dio = RegisterModule::dio
+        @ 0xb5c64c: NO checkpoint nonce interceptor, BaseOptions pins
+        Accept/Content-Type: application/json; _authHeaders @ 0xdf34d8 adds
+        Authorization: Bearer + x-msisdn)
+   PowerSnakeCubit::unlockPowerSnake     @ 0xdf3ebc -> VERDICT: response.code == 400
+       (0x190 @ 0xdf3f40) => SUCCESS + assignedReward, else FAILED(message ??
+       'Something went wrong'); DioException => ApiException(data['message'])
+   ApiCalls::getGameStatus  @ 0xc4a024 -> GET  …/gamification/status   {played, lastPlayedTime}
+   ApiCalls::getGameHistories @ 0xd03e70 -> GET …/gamification/history
+   ApiCalls::playGame       @ 0xe89a74 -> GET  …/gamification/play
+       (LEGACY layer: DOES run the checkpoint nonce pre-flight first —
+        getNonceValidation(msisdn, 'GET', path))
    OnboardingMobileMainCubit (validateUser) @ 0xe3b0fc-0xe3b134:
        resetMsisdn -> validateUser -> Settings::setMSISDN  <- KEY: the MSISDN
        is persisted BEFORE the OTP-verify screen, so the verify grant's
@@ -83,6 +99,12 @@ EP_NONCE = "/api/ooredoo-bff/checkpoint/token"
 EP_TOKEN = "/api/auth/realms/myooredoo/protocol/openid-connect/token"
 EP_LOGOUT = "/api/auth/realms/myooredoo/protocol/openid-connect/logout"
 EP_AUTHPING = "/api/ooredoo-bff/users/authping"
+
+# --- Power of Snake / gamification (features/power_snake + api_calls.dart) ---
+EP_SNAKES = "/api/ooredoo-bff/gamification/power-snake"       # ?status=AVAILABLE
+EP_GAME_STATUS = "/api/ooredoo-bff/gamification/status"       # {played, lastPlayedTime}
+EP_GAME_HISTORY = "/api/ooredoo-bff/gamification/history"
+EP_GAME_PLAY = "/api/ooredoo-bff/gamification/play"           # legacy: needs nonce
 CLIENT_ID = "myooredoo-app"
 APP_VERSION = "1.5.17"
 USER_AGENT = "Dart/3.11 (dart:io)"
@@ -215,8 +237,9 @@ def setup_logging(logfile: str | None, verbose: bool) -> None:
 
 def banner() -> None:
     LOG.info("=" * 76)
-    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION CLIENT (send/verify/keep)")
-    LOG.info("Reconstructed: requestOTPbyMSISDN @ 0xb905b8, loginWithOTP @ 0xe3e88c  [v4]")
+    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION + POWER-OF-SNAKE CLIENT")
+    LOG.info("Reconstructed: requestOTPbyMSISDN @ 0xb905b8, loginWithOTP @ 0xe3e88c,")
+    LOG.info("               getPowerSnakes @ 0xde9bfc, unlockPowerSnake @ 0xdf4388  [v5]")
     LOG.info("=" * 76)
 
 
@@ -325,22 +348,24 @@ def fp_for(state: dict, fp_mode: str, phase: str) -> str:
 # ---------------------------------------------------------------------------
 def get_nonce(session: requests.Session, base: str, msisdn: str,
               extra: dict[str, str], device: dict, timeout: float,
-              fp_msisdn: str) -> tuple[str, str]:
+              fp_msisdn: str, path: str = EP_TOKEN,
+              method: str = "POST") -> tuple[str, str]:
     url = base + EP_NONCE
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "User-Agent": USER_AGENT,
         "x-msisdn": msisdn,
-        "x-path": EP_TOKEN,
-        "x-method": "POST",
+        "x-path": path,
+        "x-method": method,
         "X-Correlation-ID": str(uuid.uuid1()),
         **APP_HEADERS,
         **device_headers(device, fp_msisdn),
         **extra,
     }
     prep = session.prepare_request(requests.Request("POST", url, headers=headers, data={}))
-    LOG.info("[NONCE] checkpoint — anti-replay pre-flight")
+    LOG.info("[NONCE] checkpoint — anti-replay pre-flight (x-path=%s, x-method=%s)",
+             path, method)
     resp = do_request(session, prep, timeout)
     nonce_id = resp.headers.get("x-nonce-id", "")
     chronos_id = resp.headers.get("x-chronos-id", "")
@@ -503,6 +528,201 @@ def authed_call(session: requests.Session, base: str, msisdn: str, access_token:
         requests.Request(method.upper(), base + path, headers=headers, data=data))
     LOG.info("[CALL] authenticated %s %s", method.upper(), path)
     return do_request(session, prep, timeout)
+
+
+# ---------------------------------------------------------------------------
+# POWER OF SNAKE — gamification module (features/power_snake, module Dio)
+#
+# Fidelity notes (all field-verified in the Dart AOT disassembly):
+#   * Transport : RegisterModule::dio @ 0xb5c64c — BaseOptions pins
+#                 Accept: application/json + Content-Type: application/json;
+#                 interceptor adds X-Correlation-ID / device data / fingerprint /
+#                 platform / X-Platform-Origin / x-version. NO checkpoint nonce
+#                 interceptor => x-nonce-id is NEVER sent by this module.
+#   * _authHeaders @ 0xdf34d8 : per-call {Authorization: Bearer <token>,
+#                 x-msisdn} (master vs slave token via Settings::getIsMaster).
+#   * getPowerSnakes @ 0xde9bfc : GET <EP_SNAKES>?status=AVAILABLE →
+#                 PowerSnakeModel {total:int, items:[PowerSnakeItemModel]}.
+#   * unlockPowerSnake @ 0xdf4388 : POST <EP_SNAKES>/<uuid>/redeem with
+#                 data:null → ZERO body bytes (Dio sends Content-Length: 0).
+#   * PowerSnakeRedeemResponse {message:str?, code:num?, assignedReward:{...}?}
+#   * VERDICT (PowerSnakeCubit @ 0xdf3f40): code == 400 → SUCCESS (show
+#                 assignedReward, then re-list), anything else → FAILED
+#                 (message ?? 'Something went wrong').
+# ---------------------------------------------------------------------------
+def snake_call(session: requests.Session, base: str, msisdn: str, access_token: str,
+               method: str, path: str, extra: dict[str, str], device: dict,
+               timeout: float, fp_msisdn: str, body: dict | None = None,
+               nonce_id: str = "", chronos_id: str = "") -> requests.Response:
+    """RemotePowerSnakeApi-style call (module Dio, Bearer + x-msisdn)."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Content-Type": "application/json",     # module Dio BaseOptions default
+        "Authorization": f"Bearer {access_token}",
+        "x-msisdn": msisdn,                     # _authHeaders @ 0xdf34d8
+        "X-Correlation-ID": str(uuid.uuid1()),
+        **APP_HEADERS,
+        **device_headers(device, fp_msisdn),
+        **extra,
+    }
+    if nonce_id:
+        headers["x-nonce-id"] = nonce_id
+        headers["x-chronos-id"] = chronos_id
+    # Dio post(..., data: null) => ZERO body bytes: pass data=None
+    data = None if body is None else json.dumps(body)
+    prep = session.prepare_request(
+        requests.Request(method.upper(), base + path, headers=headers, data=data))
+    LOG.info("[SNAKE] %s %s", method.upper(), path)
+    return do_request(session, prep, timeout)
+
+
+def snake_reward_summary(assigned) -> str:
+    """Cubit success branch @ 0xdf3f7c-0xdf40c0:
+       reward_type  = assignedReward.type
+       reward_value = reward['unlimited-usage'] non-empty  ? 'unlimited'
+                      : '<usage-value> <usage-unit>'  (each 'N/A' when null)
+       + validity suffix from the RewardDetailsModel fields."""
+    if not isinstance(assigned, dict):
+        return "(no reward data)"
+    rtype = assigned.get("type") or "?"
+    details = assigned.get("reward")
+    if isinstance(details, dict):
+        if details.get("unlimited-usage"):          # non-null AND non-empty
+            value = "unlimited"
+        else:
+            value = "{} {}".format(details.get("usage-value") or "N/A",
+                                   details.get("usage-unit") or "N/A")
+        validity = details.get("validity")
+        vunit = details.get("validity-unit")
+        vsuffix = f" · validity {validity} {vunit or ''}".rstrip() if validity else ""
+        return f"{rtype} — {value}{vsuffix}"
+    if isinstance(details, str) and details:
+        return f"{rtype} — {details}"
+    return rtype
+
+
+def snake_list(session, args, state: dict, extra: dict[str, str]) -> list:
+    """GET power-snake?status=AVAILABLE → pretty-print + cache items for 'open <n>'."""
+    sess = state["session"]
+    resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                      "GET", EP_SNAKES + "?status=AVAILABLE", extra, state, args.timeout,
+                      fp_for(state, args.fp_mode, "session"))
+    try:
+        body = resp.json()
+    except ValueError:
+        LOG.error("[!] non-JSON answer (HTTP %s) — cannot list cards.", resp.status_code)
+        return []
+    items = body.get("items") if isinstance(body, dict) else None
+    items = items if isinstance(items, list) else []
+    LOG.info("=" * 76)
+    LOG.info("[SNAKE] AVAILABLE power-snake cards: total=%s (items returned: %d)",
+             body.get("total", "?"), len(items))
+    for i, it in enumerate(items, start=1):
+        LOG.info("  #%d  uuid   : %s", i, it.get("uuid"))
+        LOG.info("      status : %s   earned: %s   expires: %s   redeemed: %s",
+                 it.get("status", "?"), it.get("earnedDate", "?"),
+                 it.get("expiryDate", "?"), it.get("redeemedDate") or "-")
+        LOG.info("      reward : %s", snake_reward_summary(it.get("assignedReward")))
+    if not items:
+        LOG.info("  (no AVAILABLE cards — earn cards by buying bundles/trying luck)")
+    LOG.info("=" * 76)
+    state["_snake_items"] = items
+    return items
+
+
+def snake_open(session, args, state: dict, extra: dict[str, str], target: str) -> bool:
+    """POST power-snake/<uuid>/redeem (EMPTY body) + app verdict (code==400=SUCCESS)."""
+    items = state.get("_snake_items") or []
+    snake_uuid = target
+    if target.isdigit():
+        idx = int(target)
+        if not (1 <= idx <= len(items)):
+            LOG.error("[!] index %d out of range — run 'snakes' first (1..%d).",
+                      idx, len(items))
+            return False
+        snake_uuid = items[idx - 1].get("uuid", "")
+    if not snake_uuid:
+        LOG.error("[!] no card uuid — run 'snakes' then 'open <n>' (or 'open <uuid>').")
+        return False
+    sess = state["session"]
+    resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                      "POST", f"{EP_SNAKES}/{snake_uuid}/redeem", extra, state,
+                      args.timeout, fp_for(state, args.fp_mode, "session"))
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    code = body.get("code")
+    message = body.get("message")
+    # --- VERDICT: PowerSnakeCubit::unlockPowerSnake @ 0xdf3f40 ---------------
+    #   cmp code, 0x190 (400) ; b.ne -> FAILED branch.  i.e. code == 400 => OK.
+    if code == 400:
+        reward = body.get("assignedReward")
+        LOG.info("=" * 76)
+        LOG.info("[+] POWER SNAKE UNLOCKED — card %s", snake_uuid)
+        LOG.info("[+] reward    : %s", snake_reward_summary(reward))
+        if message:
+            LOG.info("[+] message   : %s", message)
+        LOG.info("[i] verdict basis: body.code == 400 (PowerSnakeCubit @ 0xdf3f40)")
+        LOG.info("=" * 76)
+        # app behavior: Future.delayed(Duration) -> getPowerSnakes() refresh
+        time.sleep(1.0)
+        snake_list(session, args, state, extra)
+        return True
+    # DioException path (RemotePowerSnakeApi @ 0xdf44b8): message from the
+    # error body (Map or jsonDecode'd string) else 'Something went wrong'.
+    LOG.error("[!] OPEN FAILED — HTTP %s, body.code=%r, message=%r",
+              resp.status_code, code, message or "Something went wrong")
+    return False
+
+
+def game_status(session, args, state: dict, extra: dict[str, str]) -> None:
+    """GET gamification/status → GameCubit @ 0xc4a1d0: played/lastPlayedTime."""
+    sess = state["session"]
+    resp = authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                       "GET", EP_GAME_STATUS, None, extra, state, args.timeout,
+                       fp_for(state, args.fp_mode, "session"))
+    try:
+        body = resp.json()
+    except ValueError:
+        return
+    if isinstance(body, dict):
+        LOG.info("[GAME] status: played=%s  lastPlayedTime=%s",
+                 body.get("played"), body.get("lastPlayedTime", "-"))
+        if body.get("played") is False:
+            LOG.info("[GAME] the app would show the floating game button "
+                     "(GameUIEnableState) — 'play' is available.")
+
+
+def game_play(session, args, state: dict, extra: dict[str, str]) -> None:
+    """GET gamification/play — LEGACY layer: checkpoint nonce pre-flight first
+    (ApiCalls::playGame @ 0xe89a74: getNonceValidation(msisdn,'GET',path))."""
+    sess = state["session"]
+    nonce_id, chronos_id = ("", "") if args.no_nonce else get_nonce(
+        session, args.base_url, sess["msisdn"], extra, state, args.timeout,
+        fp_for(state, args.fp_mode, "session"), path=EP_GAME_PLAY, method="GET")
+    headers_extra = dict(extra)
+    resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                      "GET", EP_GAME_PLAY, headers_extra, state, args.timeout,
+                      fp_for(state, args.fp_mode, "session"),
+                      nonce_id=nonce_id, chronos_id=chronos_id)
+    try:
+        body = resp.json()
+        LOG.info("[GAME] play payload:\n%s",
+                 json.dumps(body, indent=2, ensure_ascii=False))
+    except ValueError:
+        pass
+
+
+def game_history(session, args, state: dict, extra: dict[str, str]) -> None:
+    """GET gamification/history (ApiCalls::getGameHistories @ 0xd03e70)."""
+    sess = state["session"]
+    authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                "GET", EP_GAME_HISTORY, None, extra, state, args.timeout,
+                fp_for(state, args.fp_mode, "session"))
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +913,16 @@ def fresh_nonce_or_empty(session, args, state, extra):
 SHELL_HELP = """
   status                       msisdn, token expiry, device ids
   ping                         POST /api/ooredoo-bff/users/authping (session proof)
+
+  POWER OF SNAKE (gamification — features/power_snake module):
+  snakes                       list AVAILABLE cards (GET …/power-snake?status=AVAILABLE)
+  open <n|uuid>                open a card: POST …/power-snake/<uuid>/redeem
+                               (<n> = the # shown by 'snakes'; app verdict:
+                               body.code == 400 => UNLOCKED + reward)
+  game                         gamification/status  {played, lastPlayedTime}
+  ghistory                     gamification/history (previous rewards)
+  play                         gamification/play  (daily game — nonce pre-flight)
+
   call METHOD PATH [JSON]      authenticated call, e.g.
                                  call POST /api/ooredoo-bff/users/detect {"msisdn":"213..."}
   get PATH                     shorthand for call GET PATH
@@ -780,6 +1010,21 @@ def session_shell(args, state: dict, extra: dict[str, str],
                                 state["session"]["access_token"],
                                 "POST", EP_AUTHPING, {}, extra, state, args.timeout,
                                 fp_for(state, args.fp_mode, "session"))
+            elif cmd == "snakes":
+                if ensure_live_token(session, args, state, extra):
+                    snake_list(session, args, state, extra)
+            elif cmd == "open" and len(parts) >= 2:
+                if ensure_live_token(session, args, state, extra):
+                    snake_open(session, args, state, extra, parts[1])
+            elif cmd == "game":
+                if ensure_live_token(session, args, state, extra):
+                    game_status(session, args, state, extra)
+            elif cmd == "ghistory":
+                if ensure_live_token(session, args, state, extra):
+                    game_history(session, args, state, extra)
+            elif cmd == "play":
+                if ensure_live_token(session, args, state, extra):
+                    game_play(session, args, state, extra)
             elif cmd == "get" and len(parts) >= 2:
                 if ensure_live_token(session, args, state, extra):
                     authed_call(session, args.base_url, msisdn,
@@ -845,9 +1090,10 @@ def session_shell(args, state: dict, extra: dict[str, str],
 # ---------------------------------------------------------------------------
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="My Ooredoo 1.5.17 — OTP login + SESSION client: send SMS OTP, "
-                    "wait for the code, verify, then KEEP the logged-in state "
-                    "(interactive authenticated session + persisted tokens + resume).",
+        description="My Ooredoo 1.5.17 — OTP login + SESSION + POWER-OF-SNAKE client: "
+                    "send SMS OTP, verify, KEEP the logged-in state (persisted + "
+                    "resumable), then list/open gamification cards "
+                    "(snakes / open / game / play) with the app's exact protocol.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("msisdn", nargs="?", help="MSISDN to log in with. Local/international "
