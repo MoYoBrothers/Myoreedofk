@@ -142,6 +142,25 @@ EP_SNAKES = "/api/ooredoo-bff/gamification/power-snake"       # ?status=AVAILABL
 EP_GAME_STATUS = "/api/ooredoo-bff/gamification/status"       # {played, lastPlayedTime}
 EP_GAME_HISTORY = "/api/ooredoo-bff/gamification/history"
 EP_GAME_PLAY = "/api/ooredoo-bff/gamification/play"           # legacy: needs nonce
+
+# --- v7: Flarie "Score & Win" — the REAL game behind the WebView -----------
+# ApiCalls::flarieGetToken @ 0xb7f90c: GET /flarie/player/token ->
+#   {"token": "<player-uuid>", "attempts": <n>}   (Bearer + x-msisdn)
+# The app injects that token as {coid} into the game URL loaded by
+# PuzzleSnakeWebView (loadGameUrl @ 0x1169e5c) / FlarieWebView — i.e. the
+# whole "game inside the app" is just a browser page keyed by that token,
+# so the SAME URL plays in any desktop/mobile browser. Campaign config and
+# URL template live in the public Strapi CMS (OoredooAssetLoader @ 0x13250c1
+# -> ApiCalls::getUiLabels @ 0xb6418c: GET /cms/v2/api/ui-labels?locale=).
+EP_FLARIE_TOKEN = "/api/ooredoo-bff/flarie/player/token"       # GET -> {token, attempts}
+EP_CMS_LABELS = "/cms/v2/api/ui-labels"                          # public, no auth
+FLARIE_GAME_TPL = ("https://game-eu.flarie.com/games/puzzle/"
+                  "a202d843-5997-49da-a876-4c7f01458660?uuid={coid}")
+# Flarie game engine API (from the game's own JS bundles — prod-api.flarie.com):
+#   POST /api/post-game-load   POST /api/post-game-start
+#   POST /api/post-game-score  POST /api/post-game-share ...
+FLARIE_API = "https://prod-api.flarie.com"
+
 CLIENT_ID = "myooredoo-app"
 APP_VERSION = "1.5.17"
 USER_AGENT = "Dart/3.11 (dart:io)"
@@ -290,12 +309,15 @@ def setup_logging(logfile: str | None, verbose: bool) -> None:
 
 def banner() -> None:
     LOG.info("=" * 76)
-    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION + POWER-OF-SNAKE CLIENT  [v6]")
+    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION + POWER-OF-SNAKE CLIENT  [v7]")
     LOG.info("Reconstructed: requestOTPbyMSISDN @ 0xb905b8, loginWithOTP @ 0xe3e88c,")
-    LOG.info("               getPowerSnakes @ 0xde9bfc, unlockPowerSnake @ 0xdf4388")
+    LOG.info("               getPowerSnakes @ 0xde9bfc, unlockPowerSnake @ 0xdf4388,")
+    LOG.info("               flarieGetToken @ 0xb7f90c, getUiLabels @ 0xb6418c")
     LOG.info("               snake autoopen — gamification bypass: probe ALL card")
     LOG.info("               statuses, redeem every card, claim the daily play gift")
-    LOG.info("               directly (spin-wheel / puzzle-snake game SKIPPED).")
+    LOG.info("               directly (spin-wheel / puzzle-snake game SKIPPED), plus")
+    LOG.info("               the Flarie Score & Win player token -> the exact game")
+    LOG.info("               URL that plays in ANY browser (no app / no WebView).")
     LOG.info("=" * 76)
 
 
@@ -899,7 +921,8 @@ def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
        1. probe cards under EVERY status (not just AVAILABLE)
        2. POST redeem on EVERY discovered uuid (regardless of its status)
        3. claim the daily play gift DIRECTLY (no spin-wheel, no puzzle game)
-       4. show gamification status + history for the final picture."""
+       4. fetch the Flarie 'Score & Win' player token + the browser game URL
+       5. show gamification status + history for the final picture."""
     LOG.info("=" * 76)
     LOG.info("[SNAKE] AUTO-OPEN — gamification bypass (no game, no AVAILABLE-only gate)")
     LOG.info("=" * 76)
@@ -911,6 +934,8 @@ def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
                  snake_reward_summary(it.get("assignedReward")))
     state["_snake_items"] = list(cards.values())   # cache for 'open <n>' too
     opened = 0
+    available = [u for u, it in cards.items()
+                 if str(it.get("status", "")).upper() == "AVAILABLE"]
     if cards:
         LOG.info("-" * 76)
         LOG.info("[SNAKE] opening every card (any status) …")
@@ -924,17 +949,31 @@ def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
             if i < len(cards):
                 time.sleep(0.7)
     else:
-        LOG.warning("[i] no cards exist under any status — redeeming nothing "
-                    "(cards are earned server-side by bundle purchases).")
+        LOG.warning("[i] no cards exist under any status.")
     LOG.info("=" * 76)
-    LOG.info("[SNAKE] cards unlocked: %d/%d", opened, len(cards))
+    LOG.info("[SNAKE] cards unlocked: %d/%d   (AVAILABLE right now: %d)",
+             opened, len(cards), len(available))
+    if not available:
+        LOG.info("-" * 76)
+        LOG.info("[i] WHERE NEW CARDS COME FROM (official CMS FAQ, live config):")
+        LOG.info("    ONE Power of Snake per BUNDLE PURCHASE — 'Achetez un forfait")
+        LOG.info("    My Ooredoo et un Power of Snake sera ajouté à votre compte'.")
+        LOG.info("    Cards are minted SERVER-SIDE by the billing event (2GB…1TB")
+        LOG.info("    mystery data, 3-day validity) — no client or API call can")
+        LOG.info("    conjure them without a purchase. This script removes ALL the")
+        LOG.info("    client gamification anyway: the moment a purchase lands a")
+        LOG.info("    card, 'autoopen'/'open' redeems it with no app UI at all.")
     LOG.info("-" * 76)
     LOG.info("[GAME] claiming the daily 'play' gift directly (wheel/puzzle SKIPPED) …")
     game_play(session, args, state, extra)
     game_status(session, args, state, extra)
     game_history(session, args, state, extra)
+    LOG.info("-" * 76)
+    LOG.info("[FLARIE] fetching the Score & Win player token (game → any browser) …")
+    flarie_get_token(session, args, state, extra)
     LOG.info("=" * 76)
-    LOG.info("[SNAKE] AUTO-OPEN complete — 'snakes' to re-list, 'open <n>' to retry.")
+    LOG.info("[SNAKE] AUTO-OPEN complete — 'snakes' to re-list, 'open <n>' to retry,")
+    LOG.info("       'flarie' for the browser game URL, 'labels' for campaign config.")
     LOG.info("=" * 76)
 
 
@@ -986,6 +1025,120 @@ def game_history(session, args, state: dict, extra: dict[str, str]) -> None:
     authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
                 "GET", EP_GAME_HISTORY, None, extra, state, args.timeout,
                 fp_for(state, args.fp_mode, "session"))
+
+
+# ---------------------------------------------------------------------------
+# v7 — FLARIE "SCORE & WIN": the actual game layer behind the WebView.
+#
+# Reconstructed from the Dart AOT + the live CMS + the Flarie game bundle:
+#   * handlePuzzleSnakeDeeplink @ 0xb7eb80 checks the remote flags
+#     (myo_puzzle_snake_enabled, excluded_rate_for_…, employee blockers),
+#     then calls ApiCalls::flarieGetToken @ 0xb7f90c
+#     (GET /api/ooredoo-bff/flarie/player/token, Bearer + x-msisdn)
+#     -> JSON {"attempts": <n>, "token": "<flarie player uuid>}.
+#   * PuzzleSnakeWebView.loadGameUrl @ 0x1169e5c: gameUrl =
+#     tr("myo_puzzle_snake_url", {"coid": token}) -> WebView loadRequest.
+#     tr() keys are NOT in the shipped assets/translations/*.json — they are
+#     fetched at RUNTIME from the public Strapi CMS (OoredooAssetLoader
+#     @ 0x13250c1 -> GET /cms/v2/api/ui-labels?locale=<en|fr|ar>), which
+#     currently serves:
+#       flarie_url = https://game-eu.flarie.com/games/puzzle/
+#                     a202d843-5997-49da-a876-4c7f01458660?uuid={coid}
+#     => the "app-only" game is a plain WEB PAGE keyed by the player token:
+#        the same URL plays in any browser, on any device, outside the app.
+#   * The page's engine POSTs to prod-api.flarie.com
+#     (/api/post-game-load, -start, -score …) — the score response carries
+#     ranking/highScore/coupon codes (server-side win validation).
+#   * POWER OF SNAKE CARDS THEMSELVES are NOT granted by this game: the CMS
+#     FAQ/instructions state one card per BUNDLE PURCHASE ("Achetez un forfait
+#     My Ooredoo et un Power of Snake sera ajouté à votre compte") — the
+#     card + its mystery data reward (2GB…1TB, 3-day validity) are minted
+#     server-side by the billing event, then redeemable via …/redeem.
+# ---------------------------------------------------------------------------
+def flarie_get_token(session, args, state: dict, extra: dict[str, str]) -> dict | None:
+    """GET /flarie/player/token (nonce pre-flight, Bearer) -> {token, attempts}
+    + the browser-playable game URL (the WebView {coid} template filled in)."""
+    sess = state["session"]
+    LOG.info("[FLARIE] player token — the key to the Score & Win game outside the app")
+    nonce_id, chronos_id = ("", "") if args.no_nonce else get_nonce(
+        session, args.base_url, sess["msisdn"], extra, state, args.timeout,
+        fp_for(state, args.fp_mode, "session"),
+        path=EP_FLARIE_TOKEN, method="GET")
+    resp = authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                       "GET", EP_FLARIE_TOKEN, None, extra, state, args.timeout,
+                       fp_for(state, args.fp_mode, "session"),
+                       nonce_id=nonce_id, chronos_id=chronos_id)
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        LOG.error("[FLARIE] non-JSON response (HTTP %s)", resp.status_code)
+        return None
+    token = body.get("token") or ""
+    attempts = body.get("attempts", "?")
+    LOG.info("[FLARIE] token    : %s", token or "(absent)")
+    LOG.info("[FLARIE] attempts : %s", attempts)
+    if token:
+        url = FLARIE_GAME_TPL.format(coid=token)
+        LOG.info("=" * 76)
+        LOG.info("[+] SCORE & WIN GAME — PLAYABLE IN ANY BROWSER (no app needed):")
+        LOG.info("    %s", url)
+        LOG.info("[i] this is the exact WebView URL the app loads with this token")
+        LOG.info("=" * 76)
+    else:
+        LOG.warning("[FLARIE] no token — the BFF gate refused "
+                    "(rate-plan excluded / campaign off / out of attempts).")
+    state["_flarie"] = {"token": token, "attempts": attempts}
+    return body
+
+
+def cms_get_labels(session, args, state: dict, locale: str = "fr",
+                   key_filter: str | None = None) -> dict:
+    """GET /cms/v2/api/ui-labels?locale=… — the PUBLIC Strapi CMS that feeds
+    easy_localization at runtime (OoredooAssetLoader). Holds the live
+    gamification campaign config: flarie_url, power_snake_enabled,
+    excluded_rate_for_…, popups, FAQ, etc. No auth required."""
+    url = f"{args.base_url}{EP_CMS_LABELS}"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "x-msisdn": (state.get("session") or {}).get("msisdn", ""),
+        "X-Correlation-ID": correlation_id(),
+        **APP_HEADERS,
+    }
+    prep = session.prepare_request(requests.Request(
+        "GET", url, params={"locale": locale, "pagination[pageSize]": "8000"},
+        headers=headers))
+    LOG.info("[CMS] ui-labels locale=%s%s", locale,
+             f" filter={key_filter!r}" if key_filter else "")
+    resp = do_request(session, prep, args.timeout)
+    try:
+        body = resp.json()
+    except ValueError:
+        LOG.error("[CMS] non-JSON response (HTTP %s)", resp.status_code)
+        return {}
+    items = {}
+    if isinstance(body, dict):
+        for entry in body.get("data") or []:
+            attrs = (entry or {}).get("attributes") or {}
+            name, value = attrs.get("name"), attrs.get("value")
+            if isinstance(name, str):
+                items[name] = value
+    LOG.info("[CMS] %d labels fetched (locale=%s)", len(items), locale)
+    if key_filter:
+        needle = key_filter.lower()
+        hits = {k: v for k, v in items.items() if needle in k.lower()}
+    else:
+        hits = {k: v for k, v in items.items()
+                if ("snake" in k.lower() or "flarie" in k.lower())}
+    if hits:
+        LOG.info("[CMS] matching labels:")
+        for k in sorted(hits):
+            LOG.info("  %-52s = %s", k, str(hits[k])[:160])
+    else:
+        LOG.info("[CMS] no matching labels.")
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -1197,9 +1350,9 @@ SHELL_HELP = """
 
   POWER OF SNAKE (gamification — features/power_snake module):
   autoopen                    THE BYPASS: probe cards under EVERY status, redeem
-                              them ALL (any status), then claim the daily 'play'
-                              gift DIRECTLY (no game) + show status/history.
-                              Works even when the app shows no AVAILABLE cards.
+                              them ALL (any status), claim the daily 'play'
+                              gift DIRECTLY (no game), then pull the Flarie
+                              'Score & Win' player token + browser game URL.
                               (aliases: harvest, snake)
   snakes [STATUS|all]         list cards (default AVAILABLE — e.g.
                               'snakes REDEEMED', 'snakes all' = no filter)
@@ -1209,6 +1362,15 @@ SHELL_HELP = """
   game                         gamification/status  {played, lastPlayedTime}
   ghistory                     gamification/history (previous rewards)
   play                         gamification/play  (daily gift — nonce pre-flight)
+
+  SCORE & WIN / CAMPAIGN CONFIG (v7 — the layer behind the WebView):
+  flarie                       GET /flarie/player/token -> {token, attempts}
+                              + the game URL …game-eu.flarie.com/games/puzzle/
+                              …?uuid=<token>  — plays in ANY browser, no app
+  labels [locale] [filter]     public CMS ui-labels (live campaign config:
+                              flarie_url, power_snake_enabled, excluded rates,
+                              popups, FAQ). locale=en|fr|ar, e.g.
+                              'labels fr snake'   (default: fr, snake+flarie keys)
 
   call METHOD PATH [JSON]      authenticated call, e.g.
                                  call POST /api/ooredoo-bff/users/detect {"msisdn":"213..."}
@@ -1328,6 +1490,13 @@ def session_shell(args, state: dict, extra: dict[str, str],
             elif cmd == "play":
                 if ensure_live_token(session, args, state, extra):
                     game_play(session, args, state, extra)
+            elif cmd in ("flarie", "scorewin"):
+                if ensure_live_token(session, args, state, extra):
+                    flarie_get_token(session, args, state, extra)
+            elif cmd == "labels":
+                loc = parts[1] if len(parts) > 1 and parts[1] in ("en", "fr", "ar") else "fr"
+                filt = parts[2] if len(parts) > 2 else None
+                cms_get_labels(session, args, state, loc, filt)
             elif cmd == "get" and len(parts) >= 2:
                 if ensure_live_token(session, args, state, extra):
                     authed_call(session, args.base_url, msisdn,
