@@ -3,7 +3,7 @@
 **Target:** My Ooredoo (Algeria) — `com.algeria.selfcare.app.android` v1.5.17 (1461)
 **Method:** Static analysis — Blutter Dart-AOT disassembly (`libapp.so`), cross-referenced with live mitmproxy captures and **field-verified** server responses
 **Scope:** `features/power_snake/**` module + legacy gamification calls in `api/api_calls.dart` + the Flarie "Score & Win" WebView layer + the runtime CMS
-**Companion client:** `ooredoo_otp_send.py` **[v7]** — commands `autoopen` (gamification bypass), `snakes`, `open`, `game`, `ghistory`, `play`, `flarie` (browser game URL), `labels` (live campaign config) + `--autoopen` one-shot flag
+**Companion client:** `ooredoo_otp_send.py` **[v8]** — after login a SIMPLE NUMBERED MENU: `1` Power of Snake (auto-open all cards), `2` Daily Game (claim today's gift), `3` cards, `4` history, `5` Score & Win browser link, `6` status, `7` new login, `8` logout, `9` custom API call, `0` exit + `--autoopen` one-shot flag
 
 ---
 
@@ -227,20 +227,25 @@ CleverTap events: `onPowerSnakeActivation` (success/failed), plus
 
 ---
 
-## 7. Replication checklist (Python client v7)
+## 7. Replication checklist (Python client v8)
 
-Implemented in `ooredoo_otp_send.py` **[v7]** (session shell + one-shot CLI):
+Implemented in `ooredoo_otp_send.py` **[v8]** (post-login NUMBERED MENU — every
+option is listed on screen, you type its number; Power of Snake and the Daily
+Game are SEPARATE items and each runs fully on its own):
 
-| Command / flag | Emits |
+| Menu item | Emits |
 |----------------|-------|
-| `autoopen` (aliases `harvest`, `snake`) / `--autoopen` | **THE GAMIFICATION BYPASS**: probes the list endpoint with EVERY status filter (and none), dedupes by uuid, POSTs redeem on EVERY card regardless of status, then claims the daily `play` gift directly (no game), shows status+history, and finally pulls the Flarie **Score & Win** player token + browser game URL. Runs even when the app shows zero AVAILABLE cards. |
-| `snakes [STATUS\|all]` | `GET …/power-snake?status=<STATUS>` (default AVAILABLE; `all` = no filter) — pretty card table, caches items |
-| `open <n\|uuid\|all>` | `POST …/power-snake/<uuid>/redeem` (zero-byte body) — applies the `code==400` verdict, prints reward, auto-refreshes the list |
-| `game` | `GET …/status` — prints `played` / `lastPlayedTime` |
-| `ghistory` | `GET …/history` |
-| `play` | checkpoint nonce pre-flight (`x-path=…/play, x-method=GET`) then `GET …/play` — the daily spin-wheel gift arrives IN THE RESPONSE (`giftName`, `validityHour`; parsed by game_home_screen @ 0xe89df8) |
-| `flarie` (alias `scorewin`) | nonce pre-flight + `GET /api/ooredoo-bff/flarie/player/token` → prints `{token, attempts}` and the **browser-playable game URL** (`flarie_url` template with `{coid}` filled) |
-| `labels [en\|fr\|ar] [filter]` | public `GET /cms/v2/api/ui-labels` — live campaign config (`flarie_url`, `power_snake_enabled`, `excluded_rate_for_…`, popups, FAQ) |
+| `1` — **Power of Snake** | **THE CARD BYPASS, fully automatic**: probes the list endpoint with EVERY status filter (and none), dedupes by uuid, POSTs redeem on EVERY card regardless of status, applies the `code==400` verdict per card, prints rewards + summary. Runs even when the app shows zero AVAILABLE cards. |
+| `2` — **Daily Game** | **THE DAILY-GIFT BYPASS, fully automatic**: `GET …/status` (played?), and if not played yet: checkpoint nonce pre-flight (`x-path=…/play, x-method=GET`) then `GET …/play` — the daily spin-wheel gift arrives IN THE RESPONSE (`giftName`, `validityHour`; parsed by game_home_screen @ 0xe89df8). If already played, shows the most recent gift from history. |
+| `3` — My Snake Cards | `GET …/power-snake` (no filter — full enumeration) — pretty card table |
+| `4` — Game History | `GET …/history` |
+| `5` — Score & Win | nonce pre-flight + `GET /api/ooredoo-bff/flarie/player/token` → prints `{token, attempts}` and the **browser-playable game URL** (`flarie_url` template with `{coid}` filled) |
+| `6` — Session Status | msisdn, token expiries, instance/device ids |
+| `7` — New Login | fresh SMS OTP flow (replaces the session) |
+| `8` — Logout | Keycloak logout + clear persisted session |
+| `9` — Custom API Call | advanced: authenticated `METHOD PATH [JSON]` with the full header suite |
+| `0` / `q` — Exit | persist the session and quit |
+| `--autoopen` flag | non-interactive: runs menu `1` + menu `2` once after login/resume, then shows the menu |
 
 ### 7.1 What the bypass does and does NOT remove (field-tested)
 
@@ -260,10 +265,10 @@ Implemented in `ooredoo_otp_send.py` **[v7]** (session shell + one-shot CLI):
   (field-verified: `{"giftName":"50Mo","validityHour":2}` with zero gameplay).
 * **Cards cannot be conjured without a purchase**: the mint is a billing-side
   event (one card per bundle purchase, per the CMS FAQ). The correct
-  headless flow is: purchase (any channel, e.g. USSD) → `autoopen` /
-  `open` redeems the new card with no app UI at all. `autoopen` also fetches
-  the **Flarie Score & Win** player token + browser game URL (§10) so the
-  second reward track is reachable outside the app too.
+  headless flow is: purchase (any channel, e.g. USSD) → menu `1` (Power of
+  Snake) redeems the new card with no app UI at all. Menu `5` (Score & Win)
+  fetches the **Flarie** player token + browser game URL (§10) so the second
+  reward track is reachable outside the app too.
 
 ### 7.2 v6 wire-format corrections (STEP-4 401 suspects)
 
@@ -414,7 +419,7 @@ The puzzle page's engine talks to `https://prod-api.flarie.com`:
 The client JS contains an `isCheater` branch on the score response — scores
 are sanity-checked server-side against the play session, so naive
 `post-game-score` replays with inflated scores are the obvious next pentest
-target (requires a live player token; **`flarie` command supplies it**).
+target (requires a live player token; **menu `5` Score & Win supplies it**).
 
 ### 10.4 What "open even when no cards" means after this research
 
@@ -424,10 +429,10 @@ target (requires a live player token; **`flarie` command supplies it**).
 | Snake cards (2GB…1TB) | **server-side mint per bundle purchase** | listing+redeem fully headless; mint itself requires the billing event — no client bypass exists |
 | Score & Win prizes | Flarie game (WebView ⇄ prod-api.flarie.com) | ✅ escaped the app — the game URL with the player token plays in any browser; score-submit API identified |
 
-`autoopen` now runs all three tracks end-to-end: enumerate → redeem → daily
-gift → Flarie token + browser URL.
+`--autoopen` runs the full harvest non-interactively (menu `1` cards → menu `2`
+daily gift); interactively each track is its own numbered menu item.
 
 ---
 
 *Authorized security-testing research artifact — use only against accounts
-you own. Companion log/proof-of-concept: `ooredoo_otp_send.py` v7.*
+you own. Companion log/proof-of-concept: `ooredoo_otp_send.py` v8.*

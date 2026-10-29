@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
- My Ooredoo (Algeria) v1.5.17 — OTP LOGIN + SESSION CLIENT  [v6 — snake-autoopen]
+ My Ooredoo (Algeria) v1.5.17 — OTP LOGIN + SESSION CLIENT  [v8 — simple menu]
 ===============================================================================
  Target app   : My Ooredoo — com.algeria.selfcare.app.android v1.5.17 (1461)
  Source       : static reverse-engineering of 'My Ooredoo_1.5.17.apks'
@@ -39,16 +39,28 @@
        gift DIRECTLY (game_home_screen parses giftName/validityHour from the
        response @ 0xe89df8 — the wheel/puzzle-snake game is pure client theater)
 
- v6 "REMOVE THE GAMIFICATION" (user requirement):
-   * `autoopen` — the gamification gate is CLIENT-SIDE ONLY (the app merely
-     asks `?status=AVAILABLE`, getPowerSnakes @ 0xde9c6c, before letting you
-     tap a card). The endpoint happily filters by any other status (or none),
-     and redeem doesn't re-check status. So: probe ALL statuses, dedupe,
-     POST redeem on EVERY card uuid found — then claim the daily play gift
-     via /gamification/play with NO game at all.
-   * works even when the app shows "no cards": REDEEMED/EXPIRED/… cards are
-     enumerated and redeem-attempted anyway; the daily play gift is claimed
-     regardless of cards.
+ v8 "SIMPLE CONTROLS" (user requirement):
+   * after login: a NUMBERED MENU — every option listed, you type its number;
+   * Power of Snake and the Daily Game are SEPARATE menu items and each runs
+     FULLY on its own (no sub-commands, no arguments):
+       1) Power of Snake -> probe EVERY card status, redeem EVERY card
+       2) Daily Game     -> status check + direct daily-gift claim
+
+ v6 "REMOVE THE GAMIFICATION" (user requirement — now menu items 1 & 2):
+   * the gamification gate is CLIENT-SIDE ONLY (the app merely asks
+     `?status=AVAILABLE`, getPowerSnakes @ 0xde9c6c, before letting you tap
+     a card). The BFF happily filters by any other status (or none), so menu
+     item 1 probes ALL statuses and POSTs redeem on EVERY card uuid found —
+     even when the app shows "no cards".
+   * FIELD VERDICT: the server DOES re-check status at redeem time (non-
+     AVAILABLE -> HTTP 500 "Power snake not available for redemption") and
+     mints cards only on BUNDLE PURCHASE (CMS FAQ: "Achetez un forfait My
+     Ooredoo et un Power of Snake sera ajouté à votre compte"). Menu 1 opens
+     everything that CAN be opened the moment it exists — zero app UI — and
+     reports the rest honestly.
+   * menu item 2 claims the daily play gift via /gamification/play with NO
+     game at all (the wheel / puzzle / Flarie WebView are pure client
+     theater) — that part is fully bypassable and works every day.
 
  v6 WIRE-FORMAT FIXES (all AOT-verified; likely fix for the STEP 4 401):
    * X-Device-Fingerprint msg order = TS + INSTANCE-UUID + MSISDN
@@ -80,10 +92,9 @@
        X-Device-Fingerprint msg includes it (FP-MODE 'auto').
 
  SESSION PRESERVATION (v4 headline feature):
-   * after LOGGED IN SUCCESSFULLY the process enters an interactive SESSION
-     SHELL: the tokens live in memory for the whole session and every command
-     (status/ping/call/refresh/resend/relog/logout) runs with the app's full
-     authenticated header suite (Authorization: Bearer …);
+   * after LOGGED IN SUCCESSFULLY the process enters a simple NUMBERED MENU:
+     the tokens live in memory for the whole session and every menu action
+     runs with the app's full authenticated header suite (Bearer …);
    * the session is ALSO persisted to the state file (mirroring the app's
      Settings storage of access/refresh tokens): rerun the script and it
      resumes the session without a new OTP (or silently refreshes the access
@@ -101,7 +112,8 @@
    STEP 3  fresh checkpoint nonce (loginWithOTP re-runs getNonceValidation)
    STEP 4  POST .../openid-connect/token  (username + otp=<CODE>) <- login
            success = 2xx + access_token (cubit closure @ 0xe3d730)
-   SESSION  interactive shell + persisted tokens + refresh/resume/logout.
+   SESSION  numbered menu (1 = Power of Snake, 2 = Daily Game, … 0 = exit)
+            + persisted tokens + refresh/resume/logout.
 
  LEGAL: for use ONLY in controlled/authorized security-testing environments
  against numbers you own or are authorized to test. No liability for misuse.
@@ -309,15 +321,15 @@ def setup_logging(logfile: str | None, verbose: bool) -> None:
 
 def banner() -> None:
     LOG.info("=" * 76)
-    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION + POWER-OF-SNAKE CLIENT  [v7]")
+    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION + POWER-OF-SNAKE CLIENT  [v8]")
     LOG.info("Reconstructed: requestOTPbyMSISDN @ 0xb905b8, loginWithOTP @ 0xe3e88c,")
     LOG.info("               getPowerSnakes @ 0xde9bfc, unlockPowerSnake @ 0xdf4388,")
     LOG.info("               flarieGetToken @ 0xb7f90c, getUiLabels @ 0xb6418c")
-    LOG.info("               snake autoopen — gamification bypass: probe ALL card")
-    LOG.info("               statuses, redeem every card, claim the daily play gift")
-    LOG.info("               directly (spin-wheel / puzzle-snake game SKIPPED), plus")
-    LOG.info("               the Flarie Score & Win player token -> the exact game")
-    LOG.info("               URL that plays in ANY browser (no app / no WebView).")
+    LOG.info("               SIMPLE NUMBERED MENU after login — 1) Power of Snake")
+    LOG.info("               (auto-open ALL cards), 2) Daily Game (claim today's")
+    LOG.info("               gift directly — wheel/puzzle SKIPPED), 3..9) cards,")
+    LOG.info("               history, Score&Win browser link, status, new login,")
+    LOG.info("               logout, custom API call — 0) exit.")
     LOG.info("=" * 76)
 
 
@@ -775,8 +787,8 @@ def snake_reward_summary(assigned) -> str:
 
 def snake_list(session, args, state: dict, extra: dict[str, str],
                status: str | None = "AVAILABLE") -> list:
-    """GET power-snake[?status=…] → pretty-print + cache items for 'open <n>'.
-    status=None → no filter (the endpoint's full enumeration)."""
+    """GET power-snake[?status=…] → pretty-print + cache items.
+    status=None → no filter (the endpoint's full enumeration — menu 3)."""
     sess = state["session"]
     path = EP_SNAKES + (f"?status={status}" if status else "")
     resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
@@ -799,7 +811,7 @@ def snake_list(session, args, state: dict, extra: dict[str, str],
                  it.get("expiryDate", "?"), it.get("redeemedDate") or "-")
         LOG.info("      reward : %s", snake_reward_summary(it.get("assignedReward")))
     if not items:
-        LOG.info("  (no cards under this filter — try 'autoopen' to probe EVERY status)")
+        LOG.info("  (no cards under this filter — menu 1 POWER OF SNAKE probes EVERY status)")
     LOG.info("=" * 76)
     state["_snake_items"] = items
     return items
@@ -846,35 +858,6 @@ def snake_open_by_uuid(session, args, state: dict, extra: dict[str, str],
     return False
 
 
-def snake_open(session, args, state: dict, extra: dict[str, str], target: str) -> bool:
-    """'open <n|uuid|all>' — n = index from the last 'snakes' listing, all =
-    redeem every cached card, uuid = explicit card id."""
-    items = state.get("_snake_items") or []
-    if target.lower() == "all":
-        if not items:
-            LOG.error("[!] card cache empty — run 'snakes' (or 'autoopen') first.")
-            return False
-        ok = 0
-        for it in items:
-            if snake_open_by_uuid(session, args, state, extra, it.get("uuid", "")):
-                ok += 1
-            time.sleep(0.7)          # be gentle with the BFF between cards
-        LOG.info("[SNAKE] 'open all' finished: %d/%d cards unlocked.", ok, len(items))
-        return ok > 0
-    snake_uuid = target
-    if target.isdigit():
-        idx = int(target)
-        if not (1 <= idx <= len(items)):
-            LOG.error("[!] index %d out of range — run 'snakes' first (1..%d).",
-                      idx, len(items))
-            return False
-        snake_uuid = items[idx - 1].get("uuid", "")
-    if not snake_uuid:
-        LOG.error("[!] no card uuid — run 'snakes' then 'open <n>' (or 'open <uuid>').")
-        return False
-    return snake_open_by_uuid(session, args, state, extra, snake_uuid)
-
-
 # ---------------------------------------------------------------------------
 # v6 — THE GAMIFICATION BYPASS
 #
@@ -882,13 +865,16 @@ def snake_open(session, args, state: dict, extra: dict[str, str], target: str) -
 #   * the ONLY thing standing between you and the cards is a QUERY PARAM —
 #     the app asks status=AVAILABLE and only draws what comes back
 #     (PowerSnakeCubit.getPowerSnakes @ 0xde9898). The server keeps every
-#     card under other statuses too (REDEEMED / EXPIRED / …) and redeem
-#     itself never re-checks the status.
+#     card under other statuses too (REDEEMED / EXPIRED / …). FIELD NOTE:
+#     redeem DOES re-check status server-side (non-AVAILABLE -> HTTP 500
+#     "Power snake not available for redemption") — so menu 1 attempts
+#     every card and opens whatever the server allows the instant it
+#     exists, with no app UI at all.
 #   * the spin-wheel / puzzle-snake / Flarie WebView games are 100% client
 #     theater: 'play' is a plain GET (with the checkpoint nonce) whose
-#     response already contains the granted gift.
-# So: enumerate all statuses, redeem everything found, then claim the daily
-# gift directly — game removed, works with zero AVAILABLE cards.
+#     response already contains the granted gift (menu 2 claims it daily).
+# So: menu 1 enumerates all statuses and redeems everything found; menu 2
+# claims the daily gift directly — the game UI is removed either way.
 # ---------------------------------------------------------------------------
 def snake_probe_all(session, args, state: dict, extra: dict[str, str]) -> dict:
     """Probe the list endpoint with EVERY status filter (plus none). Returns
@@ -916,15 +902,16 @@ def snake_probe_all(session, args, state: dict, extra: dict[str, str]) -> dict:
     return found
 
 
-def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
-    """AUTO-OPEN — the full gamification bypass in one command:
+def power_of_snake(session, args, state: dict, extra: dict[str, str]) -> None:
+    """MENU 1 — POWER OF SNAKE, fully automatic (no game, no AVAILABLE-only
+       gate, nothing else touched):
        1. probe cards under EVERY status (not just AVAILABLE)
-       2. POST redeem on EVERY discovered uuid (regardless of its status)
-       3. claim the daily play gift DIRECTLY (no spin-wheel, no puzzle game)
-       4. fetch the Flarie 'Score & Win' player token + the browser game URL
-       5. show gamification status + history for the final picture."""
+       2. show every unique card found
+       3. POST redeem on EVERY discovered uuid (regardless of its status)
+       4. summary. The server decides what can open; whatever it allows is
+          opened with ZERO app UI the moment it exists."""
     LOG.info("=" * 76)
-    LOG.info("[SNAKE] AUTO-OPEN — gamification bypass (no game, no AVAILABLE-only gate)")
+    LOG.info("[SNAKE] POWER OF SNAKE — auto-open ALL cards")
     LOG.info("=" * 76)
     cards = snake_probe_all(session, args, state, extra)
     LOG.info("=" * 76)
@@ -932,7 +919,7 @@ def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
     for i, (u, it) in enumerate(cards.items(), start=1):
         LOG.info("  #%d  %s  [%s]  %s", i, u, it.get("status", "?"),
                  snake_reward_summary(it.get("assignedReward")))
-    state["_snake_items"] = list(cards.values())   # cache for 'open <n>' too
+    state["_snake_items"] = list(cards.values())
     opened = 0
     available = [u for u, it in cards.items()
                  if str(it.get("status", "")).upper() == "AVAILABLE"]
@@ -951,7 +938,7 @@ def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
     else:
         LOG.warning("[i] no cards exist under any status.")
     LOG.info("=" * 76)
-    LOG.info("[SNAKE] cards unlocked: %d/%d   (AVAILABLE right now: %d)",
+    LOG.info("[SNAKE] DONE — cards unlocked: %d/%d   (AVAILABLE right now: %d)",
              opened, len(cards), len(available))
     if not available:
         LOG.info("-" * 76)
@@ -960,24 +947,53 @@ def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
         LOG.info("    My Ooredoo et un Power of Snake sera ajouté à votre compte'.")
         LOG.info("    Cards are minted SERVER-SIDE by the billing event (2GB…1TB")
         LOG.info("    mystery data, 3-day validity) — no client or API call can")
-        LOG.info("    conjure them without a purchase. This script removes ALL the")
+        LOG.info("    conjure them without a purchase. This script removed ALL the")
         LOG.info("    client gamification anyway: the moment a purchase lands a")
-        LOG.info("    card, 'autoopen'/'open' redeems it with no app UI at all.")
-    LOG.info("-" * 76)
-    LOG.info("[GAME] claiming the daily 'play' gift directly (wheel/puzzle SKIPPED) …")
-    game_play(session, args, state, extra)
-    game_status(session, args, state, extra)
-    game_history(session, args, state, extra)
-    LOG.info("-" * 76)
-    LOG.info("[FLARIE] fetching the Score & Win player token (game → any browser) …")
-    flarie_get_token(session, args, state, extra)
-    LOG.info("=" * 76)
-    LOG.info("[SNAKE] AUTO-OPEN complete — 'snakes' to re-list, 'open <n>' to retry,")
-    LOG.info("       'flarie' for the browser game URL, 'labels' for campaign config.")
+        LOG.info("    card, menu 1 redeems it with no app UI at all.")
     LOG.info("=" * 76)
 
 
-def game_status(session, args, state: dict, extra: dict[str, str]) -> None:
+def daily_game(session, args, state: dict, extra: dict[str, str]) -> None:
+    """MENU 2 — DAILY GAME, fully automatic (the game itself is client
+       theater — the gift is granted by a plain GET):
+       1. GET gamification/status  -> played today?
+       2. not played yet -> GET gamification/play (checkpoint nonce
+          pre-flight) -> the response IS the granted gift
+       3. already played -> show the most recent gift from the history."""
+    LOG.info("=" * 76)
+    LOG.info("[GAME] DAILY GAME — auto-claim today's free gift (no game played)")
+    LOG.info("=" * 76)
+    body = game_status(session, args, state, extra) or {}
+    if body.get("played") is True:
+        LOG.info("[GAME] today's gift already claimed (last played: %s).",
+                 body.get("lastPlayedTime", "?"))
+        _show_last_gift(session, args, state, extra)
+        LOG.info("=" * 76)
+        return
+    LOG.info("[GAME] today's gift not claimed yet — claiming it DIRECTLY …")
+    gift = game_play(session, args, state, extra)
+    if isinstance(gift, dict) and gift.get("giftName"):
+        LOG.info("=" * 76)
+        LOG.info("[+] TODAY'S GIFT GRANTED : %s", gift.get("giftName"))
+        LOG.info("[+] validity             : %s h", gift.get("validityHour", "?"))
+        LOG.info("[i] (the app would have made you spin a wheel for this)")
+        LOG.info("=" * 76)
+    else:
+        LOG.error("[!] no gift in the play response — see the wire above.")
+
+
+def _show_last_gift(session, args, state: dict, extra: dict[str, str]) -> None:
+    """Most recent entry of gamification/history (the last claimed gift)."""
+    hist = game_history(session, args, state, extra) or {}
+    entries = hist.get("gameHistoryData")
+    if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+        last = entries[0]
+        LOG.info("[i] most recent gift     : %s  (validity %s h, at %s)",
+                 last.get("giftName", "?"), last.get("validityHour", "?"),
+                 last.get("playedTime", "?"))
+
+
+def game_status(session, args, state: dict, extra: dict[str, str]) -> dict | None:
     """GET gamification/status → GameCubit @ 0xc4a1d0: played/lastPlayedTime."""
     sess = state["session"]
     resp = authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
@@ -986,16 +1002,15 @@ def game_status(session, args, state: dict, extra: dict[str, str]) -> None:
     try:
         body = resp.json()
     except ValueError:
-        return
+        return None
     if isinstance(body, dict):
         LOG.info("[GAME] status: played=%s  lastPlayedTime=%s",
                  body.get("played"), body.get("lastPlayedTime", "-"))
-        if body.get("played") is False:
-            LOG.info("[GAME] the app would show the floating game button "
-                     "(GameUIEnableState) — 'play' is available.")
+        return body
+    return None
 
 
-def game_play(session, args, state: dict, extra: dict[str, str]) -> None:
+def game_play(session, args, state: dict, extra: dict[str, str]) -> dict | None:
     """GET gamification/play — LEGACY layer: checkpoint nonce pre-flight first
     (ApiCalls::playGame @ 0xe89a74: getNonceValidation(msisdn,'GET',path)).
     Grants the daily spin-wheel gift DIRECTLY — the response IS the gift
@@ -1012,19 +1027,30 @@ def game_play(session, args, state: dict, extra: dict[str, str]) -> None:
         body = resp.json()
         LOG.info("[GAME] play payload:\n%s",
                  json.dumps(body, indent=2, ensure_ascii=False))
-        if isinstance(body, dict) and body.get("giftName"):
-            LOG.info("[+] DAILY GIFT GRANTED: %s (validity %s h)",
-                     body.get("giftName"), body.get("validityHour", "?"))
+        return body if isinstance(body, dict) else None
     except ValueError:
-        pass
+        return None
 
 
-def game_history(session, args, state: dict, extra: dict[str, str]) -> None:
+def game_history(session, args, state: dict, extra: dict[str, str]) -> dict | None:
     """GET gamification/history (ApiCalls::getGameHistories @ 0xd03e70)."""
     sess = state["session"]
-    authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
-                "GET", EP_GAME_HISTORY, None, extra, state, args.timeout,
-                fp_for(state, args.fp_mode, "session"))
+    resp = authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                       "GET", EP_GAME_HISTORY, None, extra, state, args.timeout,
+                       fp_for(state, args.fp_mode, "session"))
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    entries = body.get("gameHistoryData") if isinstance(body, dict) else None
+    if isinstance(entries, list):
+        LOG.info("[GAME] history (%d entries):", len(entries))
+        for i, e in enumerate(entries, start=1):
+            if isinstance(e, dict):
+                LOG.info("  #%d  %-12s validity %-3s h   %s", i,
+                         e.get("giftName", "?"), e.get("validityHour", "?"),
+                         e.get("playedTime", "?"))
+    return body if isinstance(body, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -1342,48 +1368,33 @@ def fresh_nonce_or_empty(session, args, state, extra):
 
 
 # ---------------------------------------------------------------------------
-# Session shell — preserves the logged-in state for the whole session
+# Session menu — v8 SIMPLE CONTROLS: one numbered list, you type a number.
+# Power of Snake and the Daily Game are SEPARATE items and each runs
+# FULLY on its own (no sub-commands, no arguments).
 # ---------------------------------------------------------------------------
-SHELL_HELP = """
-  status                       msisdn, token expiry, device ids
-  ping                         POST /api/ooredoo-bff/users/authping (session proof)
+MENU_ITEMS = (
+    ("1", "Power of Snake",   "auto-open ALL my snake cards"),
+    ("2", "Daily Game",      "claim today's free gift"),
+    ("3", "My Snake Cards",  "list all my cards"),
+    ("4", "Game History",    "my previous gifts"),
+    ("5", "Score & Win",     "browser game link (plays anywhere)"),
+    ("6", "Session Status",  "msisdn, tokens, expiry"),
+    ("7", "New Login",       "fresh SMS OTP (replaces the session)"),
+    ("8", "Logout",          "end the session on the server too"),
+    ("9", "Custom API Call", "advanced: METHOD PATH [JSON]"),
+    ("0", "Exit",            "save the session and quit"),
+)
 
-  POWER OF SNAKE (gamification — features/power_snake module):
-  autoopen                    THE BYPASS: probe cards under EVERY status, redeem
-                              them ALL (any status), claim the daily 'play'
-                              gift DIRECTLY (no game), then pull the Flarie
-                              'Score & Win' player token + browser game URL.
-                              (aliases: harvest, snake)
-  snakes [STATUS|all]         list cards (default AVAILABLE — e.g.
-                              'snakes REDEEMED', 'snakes all' = no filter)
-  open <n|uuid|all>           redeem card(s): POST …/power-snake/<uuid>/redeem
-                              (<n> = the # shown by 'snakes'; app verdict:
-                              body.code == 400 => UNLOCKED + reward)
-  game                         gamification/status  {played, lastPlayedTime}
-  ghistory                     gamification/history (previous rewards)
-  play                         gamification/play  (daily gift — nonce pre-flight)
 
-  SCORE & WIN / CAMPAIGN CONFIG (v7 — the layer behind the WebView):
-  flarie                       GET /flarie/player/token -> {token, attempts}
-                              + the game URL …game-eu.flarie.com/games/puzzle/
-                              …?uuid=<token>  — plays in ANY browser, no app
-  labels [locale] [filter]     public CMS ui-labels (live campaign config:
-                              flarie_url, power_snake_enabled, excluded rates,
-                              popups, FAQ). locale=en|fr|ar, e.g.
-                              'labels fr snake'   (default: fr, snake+flarie keys)
-
-  call METHOD PATH [JSON]      authenticated call, e.g.
-                                 call POST /api/ooredoo-bff/users/detect {"msisdn":"213..."}
-  get PATH                     shorthand for call GET PATH
-  post PATH [JSON]             shorthand for call POST PATH [JSON]
-  refresh                      grant_type=refresh_token — rotate the tokens
-  resend                       dispatch a NEW SMS OTP (login again afterwards)
-  relog                        full OTP login flow (replaces current session)
-  logout                       Keycloak logout + clear persisted session
-  tokens                       print current tokens (full)
-  help                         this text
-  exit                         persist session and quit
-""".strip()
+def print_menu(msisdn: str) -> None:
+    print()
+    print("=" * 68)
+    print(f"  MY OOREDOO — {msisdn}")
+    print("  What do you want to do?  (type the number and press Enter)")
+    print("=" * 68)
+    for num, name, desc in MENU_ITEMS:
+        print(f"  {num}) {name:<17} {desc}")
+    print("=" * 68)
 
 
 def ensure_live_token(session, args, state, extra) -> bool:
@@ -1412,43 +1423,79 @@ def ensure_live_token(session, args, state, extra) -> bool:
 
 
 def maybe_autoopen(session, args, state, extra) -> None:
-    """--autoopen hook: run the Power-of-Snake gamification bypass once."""
+    """--autoopen hook: run menu 1 (Power of Snake) + menu 2 (Daily Game)."""
     if not getattr(args, "autoopen", False):
         return
-    LOG.info("[i] --autoopen: running the Power-of-Snake gamification bypass …")
+    LOG.info("[i] --autoopen: Power of Snake + Daily Game, fully automatic …")
     if ensure_live_token(session, args, state, extra):
-        snake_autoopen(session, args, state, extra)
+        power_of_snake(session, args, state, extra)
+        daily_game(session, args, state, extra)
     else:
-        LOG.error("[!] session not usable — autoopen skipped ('relog' to log in).")
+        LOG.error("[!] session not usable — autoopen skipped (menu 7 logs in).")
 
 
-def session_shell(args, state: dict, extra: dict[str, str],
-                  session: requests.Session) -> None:
+def session_menu(args, state: dict, extra: dict[str, str],
+                 session: requests.Session) -> None:
+    """The whole post-login UI: print the numbered list, read a number, run
+    the matching action — nothing to memorize, nothing to type but a number."""
     sess = state.get("session") or {}
     msisdn = sess.get("msisdn", "?")
     LOG.info("=" * 76)
     LOG.info("[i] SESSION ACTIVE — logged in as %s", msisdn)
-    LOG.info("[i] state file   : %s (tokens persisted — rerun to resume)", os.path.abspath(args.state_file))
-    LOG.info("[i] type 'help' for session commands, 'exit' to quit")
+    LOG.info("[i] state file   : %s (tokens persisted — rerun to resume)",
+             os.path.abspath(args.state_file))
     LOG.info("=" * 76)
+    valid = {num for num, _, _ in MENU_ITEMS}
+    need_login = "[!] session not usable — pick 7 (New Login) first."
     while True:
+        print_menu(msisdn)
         try:
-            line = input(f"[ooredoo:{msisdn}] > ").strip()
+            raw = input("[?] number: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            line = "exit"
-        if not line:
+            raw = "0"
+        if raw == "":
             continue
-        parts = line.split()
-        cmd = parts[0].lower()
+        choice = raw.lstrip("0").lower() if raw.isdigit() else raw.lower()
+        if choice in ("q", "x", "quit", "exit"):
+            choice = "0"
+        elif raw.isdigit():
+            choice = choice or "0"
+        if choice not in valid:
+            LOG.error("[?] '%s' is not on the list — type a number 0-9.", raw)
+            continue
         try:
-            if cmd in ("exit", "quit"):
+            if choice == "0":                          # EXIT
                 save_state(args.state_file, state)
-                LOG.info("[i] session preserved in %s — bye.", os.path.abspath(args.state_file))
+                LOG.info("[i] session preserved in %s — bye.",
+                         os.path.abspath(args.state_file))
                 return
-            elif cmd == "help":
-                print(SHELL_HELP)
-            elif cmd == "status":
+            elif choice == "1":                        # POWER OF SNAKE
+                if ensure_live_token(session, args, state, extra):
+                    power_of_snake(session, args, state, extra)
+                else:
+                    LOG.error("%s", need_login)
+            elif choice == "2":                        # DAILY GAME
+                if ensure_live_token(session, args, state, extra):
+                    daily_game(session, args, state, extra)
+                else:
+                    LOG.error("%s", need_login)
+            elif choice == "3":                        # MY SNAKE CARDS
+                if ensure_live_token(session, args, state, extra):
+                    snake_list(session, args, state, extra, status=None)
+                else:
+                    LOG.error("%s", need_login)
+            elif choice == "4":                        # GAME HISTORY
+                if ensure_live_token(session, args, state, extra):
+                    game_history(session, args, state, extra)
+                else:
+                    LOG.error("%s", need_login)
+            elif choice == "5":                        # SCORE & WIN
+                if ensure_live_token(session, args, state, extra):
+                    flarie_get_token(session, args, state, extra)
+                else:
+                    LOG.error("%s", need_login)
+            elif choice == "6":                        # SESSION STATUS
                 sess = state.get("session") or {}
                 at = sess.get("access_token", "")
                 left = token_seconds_left(at, sess.get("expires_at"))
@@ -1458,103 +1505,60 @@ def session_shell(args, state: dict, extra: dict[str, str],
                 LOG.info("logged in since  : %s", sess.get("captured_at"))
                 LOG.info("access_token     : %s (%s)", at[:38] + "…",
                          f"{int(left)}s left" if left is not None else "no exp claim")
-                LOG.info("refresh_token    : %s (%s)", (sess.get("refresh_token", "") or "")[:38] + "…",
+                LOG.info("refresh_token    : %s (%s)",
+                         (sess.get("refresh_token", "") or "")[:38] + "…",
                          f"{int(rt_left)}s left" if rt_left is not None else "-")
                 LOG.info("instance-id      : %s", state["uuid"])
                 LOG.info("device-id        : %s", state["device_id"])
-            elif cmd == "tokens":
-                print(json.dumps(state.get("session") or {}, indent=2))
-            elif cmd == "ping":
-                if ensure_live_token(session, args, state, extra):
-                    authed_call(session, args.base_url, msisdn,
-                                state["session"]["access_token"],
-                                "POST", EP_AUTHPING, {}, extra, state, args.timeout,
-                                fp_for(state, args.fp_mode, "session"))
-            elif cmd in ("autoopen", "harvest", "snake"):
-                if ensure_live_token(session, args, state, extra):
-                    snake_autoopen(session, args, state, extra)
-            elif cmd == "snakes":
-                if ensure_live_token(session, args, state, extra):
-                    st = parts[1] if len(parts) > 1 else "AVAILABLE"
-                    snake_list(session, args, state, extra,
-                               None if st.lower() == "all" else st)
-            elif cmd == "open" and len(parts) >= 2:
-                if ensure_live_token(session, args, state, extra):
-                    snake_open(session, args, state, extra, parts[1])
-            elif cmd == "game":
-                if ensure_live_token(session, args, state, extra):
-                    game_status(session, args, state, extra)
-            elif cmd == "ghistory":
-                if ensure_live_token(session, args, state, extra):
-                    game_history(session, args, state, extra)
-            elif cmd == "play":
-                if ensure_live_token(session, args, state, extra):
-                    game_play(session, args, state, extra)
-            elif cmd in ("flarie", "scorewin"):
-                if ensure_live_token(session, args, state, extra):
-                    flarie_get_token(session, args, state, extra)
-            elif cmd == "labels":
-                loc = parts[1] if len(parts) > 1 and parts[1] in ("en", "fr", "ar") else "fr"
-                filt = parts[2] if len(parts) > 2 else None
-                cms_get_labels(session, args, state, loc, filt)
-            elif cmd == "get" and len(parts) >= 2:
-                if ensure_live_token(session, args, state, extra):
-                    authed_call(session, args.base_url, msisdn,
-                                state["session"]["access_token"],
-                                "GET", parts[1], None, extra, state, args.timeout,
-                                fp_for(state, args.fp_mode, "session"))
-            elif cmd == "post" and len(parts) >= 2:
-                body = json.loads(" ".join(parts[2:])) if len(parts) > 2 else {}
-                if ensure_live_token(session, args, state, extra):
-                    authed_call(session, args.base_url, msisdn,
-                                state["session"]["access_token"],
-                                "POST", parts[1], body, extra, state, args.timeout,
-                                fp_for(state, args.fp_mode, "session"))
-            elif cmd == "call" and len(parts) >= 3:
-                body = json.loads(" ".join(parts[3:])) if len(parts) > 3 else None
-                if ensure_live_token(session, args, state, extra):
-                    authed_call(session, args.base_url, msisdn,
-                                state["session"]["access_token"],
-                                parts[1], parts[2], body, extra, state, args.timeout,
-                                fp_for(state, args.fp_mode, "session"))
-            elif cmd == "refresh":
-                state["session"] = state.get("session") or {}
-                if not ensure_live_token(session, args, state, extra):
-                    LOG.warning("[i] tip: 'relog' to start a fresh OTP login.")
-                else:
-                    LOG.info("[i] tokens are live (auto-refresh already applied if needed).")
-            elif cmd == "resend":
-                state["_login_msisdn"] = (state.get("session") or {}).get("msisdn", msisdn)
-                nonce_id, chronos_id = ("", "") if args.no_nonce else fresh_nonce_or_empty(
-                    session, args, state, extra)
-                request_otp(session, args.base_url, state["_login_msisdn"],
-                            nonce_id, chronos_id, True, extra, state, args.timeout,
-                            fp_for(state, args.fp_mode, "dispatch"))
-                LOG.warning("[*] new OTP dispatched — use 'relog' and type the fresh code.")
-            elif cmd == "relog":
-                state["_login_msisdn"] = input("[?] phone number (Enter = same): ").strip() \
-                    or (state.get("session") or {}).get("msisdn", "")
-                state["_login_msisdn"] = normalize_msisdn(state["_login_msisdn"])
+            elif choice == "7":                        # NEW LOGIN
+                phone = input("[?] phone number (Enter = same): ").strip() \
+                    or (state.get("session") or {}).get("msisdn", "") \
+                    or msisdn
+                try:
+                    state["_login_msisdn"] = normalize_msisdn(phone)
+                except ValueError as exc:
+                    LOG.error("[!] %s — login aborted.", exc)
+                    continue
                 tokens = run_login_flow(args, state, extra, session)
                 if tokens:
                     save_state(args.state_file, state)
                     sess = state.get("session") or {}
                     msisdn = sess.get("msisdn", msisdn)
-            elif cmd == "logout":
+            elif choice == "8":                        # LOGOUT
                 sess = state.get("session") or {}
                 keycloak_logout(session, args.base_url, msisdn,
-                                sess.get("refresh_token", ""), sess.get("access_token", ""),
+                                sess.get("refresh_token", ""),
+                                sess.get("access_token", ""),
                                 extra, state, args.timeout,
                                 fp_for(state, args.fp_mode, "session"))
                 state["session"] = None
                 save_state(args.state_file, state)
-                LOG.info("[i] session cleared (local + Keycloak notified). 'relog' to log in again, 'exit' to quit.")
-            else:
-                print(f"[?] unknown command '{cmd}' — try 'help'")
+                msisdn = "?"
+                LOG.info("[i] logged out (server notified) — pick 7 to log in "
+                         "again, 0 to quit.")
+            elif choice == "9":                        # CUSTOM API CALL
+                try:
+                    line = input("[?] METHOD PATH [JSON]: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    LOG.error("[!] usage: METHOD PATH [JSON]   e.g. "
+                              "GET /api/ooredoo-bff/gamification/status")
+                    continue
+                body = json.loads(" ".join(parts[2:])) if len(parts) > 2 else None
+                if not ensure_live_token(session, args, state, extra):
+                    LOG.error("%s", need_login)
+                    continue
+                authed_call(session, args.base_url, msisdn,
+                            state["session"]["access_token"],
+                            parts[0], parts[1], body, extra, state, args.timeout,
+                            fp_for(state, args.fp_mode, "session"))
         except SystemExit:
             raise
         except Exception as exc:
-            LOG.error("[!] command failed: %s", exc)
+            LOG.error("[!] menu action failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1564,16 +1568,16 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="My Ooredoo 1.5.17 — OTP login + SESSION + POWER-OF-SNAKE client: "
                     "send SMS OTP, verify, KEEP the logged-in state (persisted + "
-                    "resumable), then list/open gamification cards and run the "
-                    "'autoopen' gamification bypass (probe every card status, redeem "
-                    "all, claim the daily play gift with NO game) — the app's exact "
-                    "wire protocol (v6).",
+                    "resumable), then a SIMPLE NUMBERED MENU: 1) Power of Snake "
+                    "(auto-open ALL cards), 2) Daily Game (claim today's gift with "
+                    "NO game), 3-9) cards/history/browser-link/status/relogin/"
+                    "logout/custom-call — the app's exact wire protocol (v8).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("msisdn", nargs="?", help="MSISDN to log in with. Local/international "
                    "forms accepted. Prompted if omitted and no saved session exists.")
     p.add_argument("--otp", help="non-interactive: the SMS OTP code to verify "
-                   "(no retry loop, no session shell on success)")
+                   "(no retry loop, no menu on success)")
     p.add_argument("--resend", action="store_true",
                    help="mark the initial OTP request as a re-send (resend=true)")
     p.add_argument("--password-param", action="store_true",
@@ -1592,8 +1596,8 @@ def main() -> None:
                         "device-id (default: app-faithful base64(utf8(json)) + "
                         "X-Platform-Data-Signature)")
     p.add_argument("--autoopen", action="store_true",
-                   help="after login/session-resume: run the Power-of-Snake bypass once "
-                        "(probe every card status, redeem all, claim the daily play gift)")
+                   help="after login/session-resume: run menu 1 (Power of Snake) + "
+                        "menu 2 (Daily Game) once, then show the menu")
     p.add_argument("--fresh", action="store_true",
                    help="ignore any saved session and perform a new OTP login")
     p.add_argument("--logout", action="store_true",
@@ -1684,7 +1688,7 @@ def main() -> None:
                 LOG.info("[i] --otp ignored: session already valid.")
             state["_login_msisdn"] = sess.get("msisdn", "")
             maybe_autoopen(session, args, state, extra)
-            session_shell(args, state, extra, session)
+            session_menu(args, state, extra, session)
             return
         LOG.info("[i] access token expired — trying refresh_token grant …")
         ok = ensure_live_token(session, args, state, extra)
@@ -1692,7 +1696,7 @@ def main() -> None:
             LOG.info("[+] SESSION RESUMED via refresh token.")
             state["_login_msisdn"] = state["session"]["msisdn"]
             maybe_autoopen(session, args, state, extra)
-            session_shell(args, state, extra, session)
+            session_menu(args, state, extra, session)
             return
         LOG.warning("[!] session expired — falling back to a fresh OTP login.")
         state["session"] = None
@@ -1731,7 +1735,7 @@ def main() -> None:
         maybe_autoopen(session, args, state, extra)
         return
     maybe_autoopen(session, args, state, extra)
-    session_shell(args, state, extra, session)
+    session_menu(args, state, extra, session)
 
 
 if __name__ == "__main__":
