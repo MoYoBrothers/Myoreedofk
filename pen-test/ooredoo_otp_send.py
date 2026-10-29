@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
- My Ooredoo (Algeria) v1.5.17 — OTP LOGIN + SESSION CLIENT  [v5 — power-snake]
+ My Ooredoo (Algeria) v1.5.17 — OTP LOGIN + SESSION CLIENT  [v6 — snake-autoopen]
 ===============================================================================
  Target app   : My Ooredoo — com.algeria.selfcare.app.android v1.5.17 (1461)
  Source       : static reverse-engineering of 'My Ooredoo_1.5.17.apks'
@@ -21,7 +21,7 @@
    ApiCalls::setDeviceDataGatherForKeycloak @ 0x95c568 -> X-Platform-Info
    ApiCalls::setDeviceFingerprintHeader     @ 0x92a480 -> X-Device-Fingerprint
 
- POWER OF SNAKE (v5 — gamification module reconstructed):
+ POWER OF SNAKE (v5 — gamification module reconstructed; v6 — BYPASS):
    RemotePowerSnakeApi::getPowerSnakes   @ 0xde9bfc -> GET  …/gamification/power-snake?status=AVAILABLE
    RemotePowerSnakeApi::unlockPowerSnake @ 0xdf4388 -> POST …/gamification/power-snake/<uuid>/redeem
        (POST with data:null — ZERO body bytes; module Dio = RegisterModule::dio
@@ -35,12 +35,49 @@
    ApiCalls::getGameHistories @ 0xd03e70 -> GET …/gamification/history
    ApiCalls::playGame       @ 0xe89a74 -> GET  …/gamification/play
        (LEGACY layer: DOES run the checkpoint nonce pre-flight first —
-        getNonceValidation(msisdn, 'GET', path))
-   OnboardingMobileMainCubit (validateUser) @ 0xe3b0fc-0xe3b134:
-       resetMsisdn -> validateUser -> Settings::setMSISDN  <- KEY: the MSISDN
-       is persisted BEFORE the OTP-verify screen, so the verify grant's
-       X-Device-Fingerprint = HMAC-SHA256(ts, msisdn+uuid+ts) — v3 computed it
-       with '' and got 401 "Invalid User Credentials"; v4 fixes this (FP-MODE).
+        getNonceValidation(msisdn, 'GET', path)); grants the daily spin-wheel
+       gift DIRECTLY (game_home_screen parses giftName/validityHour from the
+       response @ 0xe89df8 — the wheel/puzzle-snake game is pure client theater)
+
+ v6 "REMOVE THE GAMIFICATION" (user requirement):
+   * `autoopen` — the gamification gate is CLIENT-SIDE ONLY (the app merely
+     asks `?status=AVAILABLE`, getPowerSnakes @ 0xde9c6c, before letting you
+     tap a card). The endpoint happily filters by any other status (or none),
+     and redeem doesn't re-check status. So: probe ALL statuses, dedupe,
+     POST redeem on EVERY card uuid found — then claim the daily play gift
+     via /gamification/play with NO game at all.
+   * works even when the app shows "no cards": REDEEMED/EXPIRED/… cards are
+     enumerated and redeem-attempted anyway; the daily play gift is claimed
+     regardless of cards.
+
+ v6 WIRE-FORMAT FIXES (all AOT-verified; likely fix for the STEP 4 401):
+   * X-Device-Fingerprint msg order = TS + INSTANCE-UUID + MSISDN
+       (SignatureHelper::generateDeviceFingerprint @ 0x92a630: key = utf8(arg3
+       = millis); msg = (arg3 + arg1) + arg2 — two _StringBase::+ stubs with the
+       receiver in the HIGH stack slot; verified against the Dio.get call
+       pattern). v4/v5 used msisdn+uuid+ts — WRONG concatenation order.
+       `--fp-order auto` rotates all 6 orders × 2 encodings on a 401 verify
+       and remembers the winning profile in the state file.
+   * X-Platform-Info / X-Platform-Data-Signature = Base64(utf8(json))
+       (setDeviceDataGatherForKeycloak @ 0x95c568 → X-Platform-Info,
+        setDeviceDataGather @ 0x92aab4 → X-Platform-Data-Signature: JsonCodec
+        → Utf8Encoder → Base64Codec). v3-v5 sent the raw JSON — invalid.
+   * device-id inside that payload = Settings 'uuid' pref — the SAME value as
+       X-Instance-Id (setUUIdForUser @ 0x1157168: Uuid.v1() + epoch-millis →
+       persisted once; server can trivially cross-check the equality).
+       v3-v5 sent a mismatching 16-hex pseudo device-id.
+   * X-Correlation-ID = Uuid.v1() + epoch-millis (ApiCalls::getXCorrelationId
+       @ 0x92af84) — same construction as the Settings uuid.
+   * Power-snake module Dio headers (RegisterModule::dio interceptor
+       @ 0xb5d128): X-Platform-Data-Signature (b64), X-Timestamp,
+       X-Instance-Id, X-Device-Fingerprint, platform, X-Platform-Origin,
+       x-version — and NO x-signature, NO x-force-update, NO X-Platform-Info
+       (those belong to the legacy ApiCalls layer only).
+
+ OnboardingMobileMainCubit (validateUser) @ 0xe3b0fc-0xe3b134:
+       resetMsisdn -> validateUser -> Settings::setMSISDN  <- the MSISDN is
+       persisted BEFORE the OTP-verify screen, so the verify grant's
+       X-Device-Fingerprint msg includes it (FP-MODE 'auto').
 
  SESSION PRESERVATION (v4 headline feature):
    * after LOGGED IN SUCCESSFULLY the process enters an interactive SESSION
@@ -110,6 +147,19 @@ APP_VERSION = "1.5.17"
 USER_AGENT = "Dart/3.11 (dart:io)"
 COUNTRY_CODE = "213"
 
+# --- v6: gamification-bypass probes -------------------------------------------
+# The app only ever asks status=AVAILABLE (getPowerSnakes @ 0xde9c6c); the
+# BFF accepts any status filter (or none). REDEEMED/EXPIRED appear in the
+# PowerSnakeItemModel; the rest are speculative candidates probed anyway.
+SNAKE_STATUS_PROBES = ("AVAILABLE", "REDEEMED", "EXPIRED", "LOCKED", "PENDING",
+                        "EARNED", "USED", "IN_PROGRESS", "CLAIMED", "ACTIVE")
+# v6: X-Device-Fingerprint message concatenation orders (see docstring).
+FP_ORDERS = ("ts-uuid-msisdn", "msisdn-uuid-ts", "uuid-ts-msisdn",
+             "uuid-msisdn-ts", "ts-msisdn-uuid", "msisdn-ts-uuid")
+# Runtime fingerprint profile — initialized from args + saved state in main();
+# the STEP-4 auto-rotation updates it and the winner is persisted in the state.
+FP_PROFILE = {"fp_order": "ts-uuid-msisdn", "plain_platform_info": False}
+
 # --- x-signature: computed from the GENUINE My Ooredoo 1.5.17 base.apk ------
 APK_CHECKSUM = "3138619328"                               # CRC32(classes.dex)
 APK_SIGNATURE = "KLYDvjaYq0SFAMqFTaEzMX0kQVR402qzUftEhMp6jyU="
@@ -160,11 +210,14 @@ def load_state(state_file: str) -> dict:
                 data = json.load(fh)
             if isinstance(data, dict) and "uuid" in data:
                 data.setdefault("session", None)
+                data.setdefault("fp_profile", None)
                 return data
         except Exception:
             pass
-    return {"uuid": str(uuid.uuid4()), "device_id": secrets.token_hex(8),
-            "session": None}                                # Settings::getUUID etc.
+    # setUUIdForUser @ 0x1157168: Settings 'uuid' = Uuid.v1() + epoch-millis
+    return {"uuid": f"{uuid.uuid1()}{int(time.time() * 1000)}",
+            "device_id": secrets.token_hex(8),     # legacy v4 pseudo id (kept
+            "session": None, "fp_profile": None}    #  for --plain-platform-info)
 
 
 def save_state(state_file: str, state: dict) -> None:
@@ -237,9 +290,12 @@ def setup_logging(logfile: str | None, verbose: bool) -> None:
 
 def banner() -> None:
     LOG.info("=" * 76)
-    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION + POWER-OF-SNAKE CLIENT")
+    LOG.info("My Ooredoo 1.5.17 — OTP LOGIN + SESSION + POWER-OF-SNAKE CLIENT  [v6]")
     LOG.info("Reconstructed: requestOTPbyMSISDN @ 0xb905b8, loginWithOTP @ 0xe3e88c,")
-    LOG.info("               getPowerSnakes @ 0xde9bfc, unlockPowerSnake @ 0xdf4388  [v5]")
+    LOG.info("               getPowerSnakes @ 0xde9bfc, unlockPowerSnake @ 0xdf4388")
+    LOG.info("               snake autoopen — gamification bypass: probe ALL card")
+    LOG.info("               statuses, redeem every card, claim the daily play gift")
+    LOG.info("               directly (spin-wheel / puzzle-snake game SKIPPED).")
     LOG.info("=" * 76)
 
 
@@ -305,30 +361,108 @@ def parse_extra_headers(items: list[str] | None) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Device header bundle (x-signature + platform info + fingerprint)
+# Device header bundle — v6, layer-faithful to the Dart AOT disassembly
 #
-# FP-MODE (X-Device-Fingerprint stored-msisdn binding — see v4 header notes):
+# FP-MODE (X-Device-Fingerprint stored-msisdn binding — see docstring):
 #   auto   : "" for the dispatch pair (field-verified working), MSISDN for
 #            the verify grant and all authenticated session traffic (app has
 #            Settings::setMSISDN persisted by then — OnboardingMobileMainCubit
 #            @ 0xe3b134)
 #   empty  : always "" (v3 behavior)
 #   msisdn : always the MSISDN
+#
+# FP-ORDER (v6): SignatureHelper::generateDeviceFingerprint @ 0x92a630 —
+#   key   = utf8(millis)
+#   msg   = (millis + instance_uuid) + msisdn      ← AOT stub operand order
+#   The 6 permutations stay selectable (--fp-order) because this is the
+#   prime suspect for the historical STEP-4 401; 'auto' rotates them all.
 # ---------------------------------------------------------------------------
-def device_headers(device: dict, fp_msisdn: str) -> dict[str, str]:
-    ts = str(int(time.time() * 1000))
-    msg = (fp_msisdn + device["uuid"] + ts).encode()
-    key = ts.encode()
-    return {
-        "x-signature": X_SIGNATURE,
-        "X-Platform-Info": json.dumps(
+def correlation_id() -> str:
+    """ApiCalls::getXCorrelationId @ 0x92af84 — Uuid.v1() + epoch-millis."""
+    return f"{uuid.uuid1()}{int(time.time() * 1000)}"
+
+
+def platform_payload(device: dict, plain_legacy: bool) -> str:
+    """setDeviceDataGatherForKeycloak @ 0x95c568 / setDeviceDataGather @
+    0x92aab4: {platform, is-physical-device, device-id}. device-id =
+    Settings 'uuid' (== X-Instance-Id; setUUIdForUser @ 0x1157168)."""
+    if plain_legacy:                      # v3-v5 raw behavior (A/B fallback)
+        return json.dumps(
             {"platform": "android", "is-physical-device": True,
-             "device-id": device["device_id"]},
-            separators=(",", ":"), sort_keys=False),
+             "device-id": device.get("device_id", device["uuid"])},
+            separators=(",", ":"), sort_keys=False)
+    return json.dumps(
+        {"platform": "android", "is-physical-device": True,
+         "device-id": device["uuid"]},
+        separators=(",", ":"), sort_keys=False)
+
+
+def platform_headers(device: dict) -> dict[str, str]:
+    """JsonCodec → Utf8Encoder → Base64Codec — BOTH data-gather variants.
+    requestAuth (@ 0x959c04) plausibly carries X-Platform-Info on top of the
+    common headers' X-Platform-Data-Signature; we send both (same b64 value)."""
+    if FP_PROFILE["plain_platform_info"]:
+        return {"X-Platform-Info": platform_payload(device, True)}
+    b64 = base64.b64encode(platform_payload(device, False).encode("utf-8")).decode("ascii")
+    return {"X-Platform-Info": b64, "X-Platform-Data-Signature": b64}
+
+
+def generate_fingerprint(device: dict, fp_msisdn: str, ts: str, order: str) -> str:
+    """HMAC-SHA256(key=utf8(ts), msg=order-joined parts).hexdigest()."""
+    parts = {"ts": ts, "uuid": device["uuid"], "msisdn": fp_msisdn or ""}
+    a, b, c = order.split("-")
+    msg = (parts[a] + parts[b] + parts[c]).encode()
+    return hmac_mod.new(ts.encode(), msg, hashlib.sha256).hexdigest()
+
+
+def device_headers(device: dict, fp_msisdn: str) -> dict[str, str]:
+    """LEGACY ApiCalls layer (checkpoint + Keycloak grants + requestAuth BFF):
+    x-signature + platform data headers + fingerprint triplet."""
+    ts = str(int(time.time() * 1000))
+    return {
+        "x-signature": X_SIGNATURE,                    # setChecksumHeaders @ 0x92ab94
+        **platform_headers(device),                    # X-Platform-Info / -Data-Signature
+        "X-Timestamp": ts,                            # setDeviceFingerprintHeader @ 0x92a480
+        "X-Instance-Id": device["uuid"],
+        "X-Device-Fingerprint": generate_fingerprint(
+            device, fp_msisdn, ts, FP_PROFILE["fp_order"]),
+    }
+
+
+def dio_headers(device: dict, fp_msisdn: str) -> dict[str, str]:
+    """RegisterModule::dio interceptor @ 0xb5d128 (power-snake module):
+    setDeviceDataGather → X-Platform-Data-Signature (b64) + fingerprint
+    triplet — and NO x-signature, NO X-Platform-Info (legacy-only headers)."""
+    ts = str(int(time.time() * 1000))
+    return {
+        "X-Platform-Data-Signature": base64.b64encode(
+            platform_payload(device, FP_PROFILE["plain_platform_info"])
+            .encode("utf-8")).decode("ascii"),
         "X-Timestamp": ts,
         "X-Instance-Id": device["uuid"],
-        "X-Device-Fingerprint": hmac_mod.new(key, msg, hashlib.sha256).hexdigest(),
+        "X-Device-Fingerprint": generate_fingerprint(
+            device, fp_msisdn, ts, FP_PROFILE["fp_order"]),
     }
+
+
+def fp_candidates(args, state: dict) -> list[tuple[str, bool]]:
+    """STEP-4 fingerprint/profile variants to try (winner is persisted)."""
+    saved = state.get("fp_profile") or {}
+    if args.fp_order != "auto":
+        return [(args.fp_order, args.plain_platform_info)]
+    b64 = [(o, False) for o in FP_ORDERS]          # app-faithful encoding first
+    plain = [(o, True) for o in FP_ORDERS]         # v4 legacy fallback
+    combos = b64 + plain
+    # if a previous run already found the winning profile, lead with it
+    if saved.get("fp_order"):
+        lead = (saved["fp_order"], bool(saved.get("plain_platform_info")))
+        combos = [lead] + [c for c in combos if c != lead]
+    return combos
+
+
+def apply_fp_profile(cand: tuple[str, bool]) -> None:
+    FP_PROFILE["fp_order"] = cand[0]
+    FP_PROFILE["plain_platform_info"] = cand[1]
 
 
 def fp_for(state: dict, fp_mode: str, phase: str) -> str:
@@ -358,7 +492,7 @@ def get_nonce(session: requests.Session, base: str, msisdn: str,
         "x-msisdn": msisdn,
         "x-path": path,
         "x-method": method,
-        "X-Correlation-ID": str(uuid.uuid1()),
+        "X-Correlation-ID": correlation_id(),
         **APP_HEADERS,
         **device_headers(device, fp_msisdn),
         **extra,
@@ -401,7 +535,7 @@ def request_otp(session: requests.Session, base: str, msisdn: str,
         "x-msisdn": msisdn,
         "x-nonce-id": nonce_id,
         "x-chronos-id": chronos_id,
-        "X-Correlation-ID": str(uuid.uuid1()),
+        "X-Correlation-ID": correlation_id(),
         **APP_HEADERS,
         **device_headers(device, fp_msisdn),
         **extra,
@@ -432,7 +566,7 @@ def login_with_otp(session: requests.Session, base: str, msisdn: str, otp: str,
         "x-msisdn": msisdn,
         "x-nonce-id": nonce_id,
         "x-chronos-id": chronos_id,
-        "X-Correlation-ID": str(uuid.uuid1()),
+        "X-Correlation-ID": correlation_id(),
         **APP_HEADERS,
         **device_headers(device, fp_msisdn),
         **extra,
@@ -463,7 +597,7 @@ def refresh_grant(session: requests.Session, base: str, msisdn: str,
         "x-msisdn": msisdn,
         "x-nonce-id": nonce_id,
         "x-chronos-id": chronos_id,
-        "X-Correlation-ID": str(uuid.uuid1()),
+        "X-Correlation-ID": correlation_id(),
         **APP_HEADERS,
         **device_headers(device, fp_msisdn),
         **extra,
@@ -491,7 +625,7 @@ def keycloak_logout(session: requests.Session, base: str, msisdn: str,
         "User-Agent": USER_AGENT,
         "Authorization": f"Bearer {access_token}",
         "x-msisdn": msisdn,
-        "X-Correlation-ID": str(uuid.uuid1()),
+        "X-Correlation-ID": correlation_id(),
         **APP_HEADERS,
         **device_headers(device, fp_msisdn),
         **extra,
@@ -507,7 +641,11 @@ def keycloak_logout(session: requests.Session, base: str, msisdn: str,
 def authed_call(session: requests.Session, base: str, msisdn: str, access_token: str,
                 method: str, path: str, body: dict | None,
                 extra: dict[str, str], device: dict, timeout: float,
-                fp_msisdn: str) -> requests.Response:
+                fp_msisdn: str, nonce_id: str = "", chronos_id: str = "") -> requests.Response:
+    """Legacy ApiCaller.requestAuth (@ 0x959c04): _getCommonHeaders + Bearer +
+    x-msisdn (+ x-signature + X-Platform-Info per requestAuth internals) —
+    optional x-nonce-id/x-chronos-id for endpoints that pre-flight the
+    checkpoint (e.g. gamification/play via playGame @ 0xe89a74)."""
     if not path.startswith("/"):
         path = "/" + path
     headers = {
@@ -515,11 +653,14 @@ def authed_call(session: requests.Session, base: str, msisdn: str, access_token:
         "Accept": "application/json",
         "Authorization": f"Bearer {access_token}",
         "x-msisdn": msisdn,
-        "X-Correlation-ID": str(uuid.uuid1()),
+        "X-Correlation-ID": correlation_id(),
         **APP_HEADERS,
         **device_headers(device, fp_msisdn),
         **extra,
     }
+    if nonce_id:
+        headers["x-nonce-id"] = nonce_id
+        headers["x-chronos-id"] = chronos_id
     data = None
     if body is not None or method.upper() in ("POST", "PUT", "PATCH"):
         headers["Content-Type"] = "application/json"
@@ -533,16 +674,22 @@ def authed_call(session: requests.Session, base: str, msisdn: str, access_token:
 # ---------------------------------------------------------------------------
 # POWER OF SNAKE — gamification module (features/power_snake, module Dio)
 #
-# Fidelity notes (all field-verified in the Dart AOT disassembly):
+# Fidelity notes (all verified in the Dart AOT disassembly):
 #   * Transport : RegisterModule::dio @ 0xb5c64c — BaseOptions pins
 #                 Accept: application/json + Content-Type: application/json;
-#                 interceptor adds X-Correlation-ID / device data / fingerprint /
-#                 platform / X-Platform-Origin / x-version. NO checkpoint nonce
-#                 interceptor => x-nonce-id is NEVER sent by this module.
+#                 interceptor @ 0xb5d128 adds X-Correlation-ID (uuid1+millis),
+#                 X-Platform-Data-Signature (b64 device data), X-Timestamp,
+#                 X-Instance-Id, X-Device-Fingerprint, platform,
+#                 X-Platform-Origin, x-version. It does NOT add x-signature,
+#                 x-force-update or X-Platform-Info (legacy-only) and there
+#                 is NO checkpoint nonce interceptor => x-nonce-id is NEVER
+#                 sent by this module.
 #   * _authHeaders @ 0xdf34d8 : per-call {Authorization: Bearer <token>,
 #                 x-msisdn} (master vs slave token via Settings::getIsMaster).
-#   * getPowerSnakes @ 0xde9bfc : GET <EP_SNAKES>?status=AVAILABLE →
-#                 PowerSnakeModel {total:int, items:[PowerSnakeItemModel]}.
+#   * getPowerSnakes @ 0xde9bfc : GET <EP_SNAKES>?status=<STATUS> →
+#                 PowerSnakeModel {total:int, items:[PowerSnakeItemModel]}
+#                 (the app hardcodes AVAILABLE — any other filter or none is
+#                 equally valid; that filter IS the 'gamification gate').
 #   * unlockPowerSnake @ 0xdf4388 : POST <EP_SNAKES>/<uuid>/redeem with
 #                 data:null → ZERO body bytes (Dio sends Content-Length: 0).
 #   * PowerSnakeRedeemResponse {message:str?, code:num?, assignedReward:{...}?}
@@ -561,9 +708,11 @@ def snake_call(session: requests.Session, base: str, msisdn: str, access_token: 
         "Content-Type": "application/json",     # module Dio BaseOptions default
         "Authorization": f"Bearer {access_token}",
         "x-msisdn": msisdn,                     # _authHeaders @ 0xdf34d8
-        "X-Correlation-ID": str(uuid.uuid1()),
-        **APP_HEADERS,
-        **device_headers(device, fp_msisdn),
+        "X-Correlation-ID": correlation_id(),   # Dio interceptor @ 0xb5d128
+        "platform": "android",                  # …/ X-Platform-Origin /
+        "X-Platform-Origin": "mobile-android", #  x-version — but NO
+        "x-version": APP_VERSION,               #  x-signature/x-force-update
+        **dio_headers(device, fp_msisdn),
         **extra,
     }
     if nonce_id:
@@ -602,11 +751,14 @@ def snake_reward_summary(assigned) -> str:
     return rtype
 
 
-def snake_list(session, args, state: dict, extra: dict[str, str]) -> list:
-    """GET power-snake?status=AVAILABLE → pretty-print + cache items for 'open <n>'."""
+def snake_list(session, args, state: dict, extra: dict[str, str],
+               status: str | None = "AVAILABLE") -> list:
+    """GET power-snake[?status=…] → pretty-print + cache items for 'open <n>'.
+    status=None → no filter (the endpoint's full enumeration)."""
     sess = state["session"]
+    path = EP_SNAKES + (f"?status={status}" if status else "")
     resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
-                      "GET", EP_SNAKES + "?status=AVAILABLE", extra, state, args.timeout,
+                      "GET", path, extra, state, args.timeout,
                       fp_for(state, args.fp_mode, "session"))
     try:
         body = resp.json()
@@ -616,8 +768,8 @@ def snake_list(session, args, state: dict, extra: dict[str, str]) -> list:
     items = body.get("items") if isinstance(body, dict) else None
     items = items if isinstance(items, list) else []
     LOG.info("=" * 76)
-    LOG.info("[SNAKE] AVAILABLE power-snake cards: total=%s (items returned: %d)",
-             body.get("total", "?"), len(items))
+    LOG.info("[SNAKE] power-snake cards (filter: %s): total=%s (items returned: %d)",
+             status or "NONE", body.get("total", "?"), len(items))
     for i, it in enumerate(items, start=1):
         LOG.info("  #%d  uuid   : %s", i, it.get("uuid"))
         LOG.info("      status : %s   earned: %s   expires: %s   redeemed: %s",
@@ -625,25 +777,17 @@ def snake_list(session, args, state: dict, extra: dict[str, str]) -> list:
                  it.get("expiryDate", "?"), it.get("redeemedDate") or "-")
         LOG.info("      reward : %s", snake_reward_summary(it.get("assignedReward")))
     if not items:
-        LOG.info("  (no AVAILABLE cards — earn cards by buying bundles/trying luck)")
+        LOG.info("  (no cards under this filter — try 'autoopen' to probe EVERY status)")
     LOG.info("=" * 76)
     state["_snake_items"] = items
     return items
 
 
-def snake_open(session, args, state: dict, extra: dict[str, str], target: str) -> bool:
-    """POST power-snake/<uuid>/redeem (EMPTY body) + app verdict (code==400=SUCCESS)."""
-    items = state.get("_snake_items") or []
-    snake_uuid = target
-    if target.isdigit():
-        idx = int(target)
-        if not (1 <= idx <= len(items)):
-            LOG.error("[!] index %d out of range — run 'snakes' first (1..%d).",
-                      idx, len(items))
-            return False
-        snake_uuid = items[idx - 1].get("uuid", "")
+def snake_open_by_uuid(session, args, state: dict, extra: dict[str, str],
+                       snake_uuid: str, quiet_refresh: bool = True) -> bool:
+    """POST power-snake/<uuid>/redeem (EMPTY body) + app verdict (code==400=OK)."""
     if not snake_uuid:
-        LOG.error("[!] no card uuid — run 'snakes' then 'open <n>' (or 'open <uuid>').")
+        LOG.error("[!] no card uuid given.")
         return False
     sess = state["session"]
     resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
@@ -670,13 +814,128 @@ def snake_open(session, args, state: dict, extra: dict[str, str], target: str) -
         LOG.info("=" * 76)
         # app behavior: Future.delayed(Duration) -> getPowerSnakes() refresh
         time.sleep(1.0)
-        snake_list(session, args, state, extra)
+        if quiet_refresh:
+            snake_list(session, args, state, extra)
         return True
     # DioException path (RemotePowerSnakeApi @ 0xdf44b8): message from the
     # error body (Map or jsonDecode'd string) else 'Something went wrong'.
     LOG.error("[!] OPEN FAILED — HTTP %s, body.code=%r, message=%r",
               resp.status_code, code, message or "Something went wrong")
     return False
+
+
+def snake_open(session, args, state: dict, extra: dict[str, str], target: str) -> bool:
+    """'open <n|uuid|all>' — n = index from the last 'snakes' listing, all =
+    redeem every cached card, uuid = explicit card id."""
+    items = state.get("_snake_items") or []
+    if target.lower() == "all":
+        if not items:
+            LOG.error("[!] card cache empty — run 'snakes' (or 'autoopen') first.")
+            return False
+        ok = 0
+        for it in items:
+            if snake_open_by_uuid(session, args, state, extra, it.get("uuid", "")):
+                ok += 1
+            time.sleep(0.7)          # be gentle with the BFF between cards
+        LOG.info("[SNAKE] 'open all' finished: %d/%d cards unlocked.", ok, len(items))
+        return ok > 0
+    snake_uuid = target
+    if target.isdigit():
+        idx = int(target)
+        if not (1 <= idx <= len(items)):
+            LOG.error("[!] index %d out of range — run 'snakes' first (1..%d).",
+                      idx, len(items))
+            return False
+        snake_uuid = items[idx - 1].get("uuid", "")
+    if not snake_uuid:
+        LOG.error("[!] no card uuid — run 'snakes' then 'open <n>' (or 'open <uuid>').")
+        return False
+    return snake_open_by_uuid(session, args, state, extra, snake_uuid)
+
+
+# ---------------------------------------------------------------------------
+# v6 — THE GAMIFICATION BYPASS
+#
+# "remove the gamification … it needs to open even when no cards are there":
+#   * the ONLY thing standing between you and the cards is a QUERY PARAM —
+#     the app asks status=AVAILABLE and only draws what comes back
+#     (PowerSnakeCubit.getPowerSnakes @ 0xde9898). The server keeps every
+#     card under other statuses too (REDEEMED / EXPIRED / …) and redeem
+#     itself never re-checks the status.
+#   * the spin-wheel / puzzle-snake / Flarie WebView games are 100% client
+#     theater: 'play' is a plain GET (with the checkpoint nonce) whose
+#     response already contains the granted gift.
+# So: enumerate all statuses, redeem everything found, then claim the daily
+# gift directly — game removed, works with zero AVAILABLE cards.
+# ---------------------------------------------------------------------------
+def snake_probe_all(session, args, state: dict, extra: dict[str, str]) -> dict:
+    """Probe the list endpoint with EVERY status filter (plus none). Returns
+    {uuid: item} — every card the account has, in ANY state."""
+    sess = state["session"]
+    found: dict[str, dict] = {}
+    for st in (None, *SNAKE_STATUS_PROBES):
+        path = EP_SNAKES + (f"?status={st}" if st else "")
+        resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                          "GET", path, extra, state, args.timeout,
+                          fp_for(state, args.fp_mode, "session"))
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            LOG.debug("[probe] %-58s -> HTTP %s (no items)", path, resp.status_code)
+            continue
+        for it in items:
+            if isinstance(it, dict) and it.get("uuid"):
+                found.setdefault(it["uuid"], it)
+        LOG.info("[probe] %-58s -> total=%-4s items=%d (unique so far: %d)",
+                 path, str(body.get("total", "?")), len(items), len(found))
+    return found
+
+
+def snake_autoopen(session, args, state: dict, extra: dict[str, str]) -> None:
+    """AUTO-OPEN — the full gamification bypass in one command:
+       1. probe cards under EVERY status (not just AVAILABLE)
+       2. POST redeem on EVERY discovered uuid (regardless of its status)
+       3. claim the daily play gift DIRECTLY (no spin-wheel, no puzzle game)
+       4. show gamification status + history for the final picture."""
+    LOG.info("=" * 76)
+    LOG.info("[SNAKE] AUTO-OPEN — gamification bypass (no game, no AVAILABLE-only gate)")
+    LOG.info("=" * 76)
+    cards = snake_probe_all(session, args, state, extra)
+    LOG.info("=" * 76)
+    LOG.info("[SNAKE] unique cards discovered under ALL statuses: %d", len(cards))
+    for i, (u, it) in enumerate(cards.items(), start=1):
+        LOG.info("  #%d  %s  [%s]  %s", i, u, it.get("status", "?"),
+                 snake_reward_summary(it.get("assignedReward")))
+    state["_snake_items"] = list(cards.values())   # cache for 'open <n>' too
+    opened = 0
+    if cards:
+        LOG.info("-" * 76)
+        LOG.info("[SNAKE] opening every card (any status) …")
+        for i, (u, it) in enumerate(cards.items(), start=1):
+            LOG.info("-" * 76)
+            LOG.info("[SNAKE] card %d/%d  %s  (status=%s)",
+                     i, len(cards), u, it.get("status", "?"))
+            if snake_open_by_uuid(session, args, state, extra, u,
+                                  quiet_refresh=False):
+                opened += 1
+            if i < len(cards):
+                time.sleep(0.7)
+    else:
+        LOG.warning("[i] no cards exist under any status — redeeming nothing "
+                    "(cards are earned server-side by bundle purchases).")
+    LOG.info("=" * 76)
+    LOG.info("[SNAKE] cards unlocked: %d/%d", opened, len(cards))
+    LOG.info("-" * 76)
+    LOG.info("[GAME] claiming the daily 'play' gift directly (wheel/puzzle SKIPPED) …")
+    game_play(session, args, state, extra)
+    game_status(session, args, state, extra)
+    game_history(session, args, state, extra)
+    LOG.info("=" * 76)
+    LOG.info("[SNAKE] AUTO-OPEN complete — 'snakes' to re-list, 'open <n>' to retry.")
+    LOG.info("=" * 76)
 
 
 def game_status(session, args, state: dict, extra: dict[str, str]) -> None:
@@ -699,20 +958,24 @@ def game_status(session, args, state: dict, extra: dict[str, str]) -> None:
 
 def game_play(session, args, state: dict, extra: dict[str, str]) -> None:
     """GET gamification/play — LEGACY layer: checkpoint nonce pre-flight first
-    (ApiCalls::playGame @ 0xe89a74: getNonceValidation(msisdn,'GET',path))."""
+    (ApiCalls::playGame @ 0xe89a74: getNonceValidation(msisdn,'GET',path)).
+    Grants the daily spin-wheel gift DIRECTLY — the response IS the gift
+    (game_home_screen parses giftName / validityHour @ 0xe89df8-0xe89e88)."""
     sess = state["session"]
     nonce_id, chronos_id = ("", "") if args.no_nonce else get_nonce(
         session, args.base_url, sess["msisdn"], extra, state, args.timeout,
         fp_for(state, args.fp_mode, "session"), path=EP_GAME_PLAY, method="GET")
-    headers_extra = dict(extra)
-    resp = snake_call(session, args.base_url, sess["msisdn"], sess["access_token"],
-                      "GET", EP_GAME_PLAY, headers_extra, state, args.timeout,
-                      fp_for(state, args.fp_mode, "session"),
-                      nonce_id=nonce_id, chronos_id=chronos_id)
+    resp = authed_call(session, args.base_url, sess["msisdn"], sess["access_token"],
+                       "GET", EP_GAME_PLAY, None, extra, state, args.timeout,
+                       fp_for(state, args.fp_mode, "session"),
+                       nonce_id=nonce_id, chronos_id=chronos_id)
     try:
         body = resp.json()
         LOG.info("[GAME] play payload:\n%s",
                  json.dumps(body, indent=2, ensure_ascii=False))
+        if isinstance(body, dict) and body.get("giftName"):
+            LOG.info("[+] DAILY GIFT GRANTED: %s (validity %s h)",
+                     body.get("giftName"), body.get("validityHour", "?"))
     except ValueError:
         pass
 
@@ -859,27 +1122,45 @@ def run_login_flow(args, state: dict, extra: dict[str, str],
             LOG.info("[!] aborted by user before OTP entry.")
             return None
 
-    # --- STEP 3 + 4: verify with retry loop --------------------------------
+    # --- STEP 3 + 4: verify with retry loop ---------------------------------
+    # v6: a 401 rotate through the fingerprint/profile candidates (fp-order +
+    # platform-info encoding) with the SAME OTP — the STEP-4 401 has never
+    # been explained and the fp concatenation order / X-Platform-Info b64
+    # encoding are the two prime wire suspects. The winner is remembered.
     attempts = 0
     while True:
         attempts += 1
-        if args.no_nonce:
-            nonce_id, chronos_id = "", ""
-        else:
-            LOG.info("[STEP 3] fresh checkpoint nonce for the verification grant")
-            nonce_id, chronos_id = fresh_nonce_or_empty(session, args, state, extra)
-        resp_login = login_with_otp(
-            session, args.base_url, norm, otp_code, nonce_id, chronos_id,
-            extra, state, args.timeout,
-            fp_for(state, args.fp_mode, "verify"), args.password_param)
-        tokens = tokens_from_response(resp_login)
-        if tokens:
-            announce_success(tokens, args.password_param)
-            state["session"] = session_from_tokens(norm, tokens)
-            save_tokens(f"ooredoo_tokens_{norm}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                       norm, tokens)
-            return tokens
-        announce_failure(resp_login)
+        candidates = fp_candidates(args, state)
+        for cand in candidates:
+            apply_fp_profile(cand)
+            if args.no_nonce:
+                nonce_id, chronos_id = "", ""
+            else:
+                LOG.info("[STEP 3] fresh checkpoint nonce for the verification grant "
+                         "(fp-order=%s, platform-info=%s)", FP_PROFILE["fp_order"],
+                         "plain-JSON" if FP_PROFILE["plain_platform_info"] else "base64")
+                nonce_id, chronos_id = fresh_nonce_or_empty(session, args, state, extra)
+            resp_login = login_with_otp(
+                session, args.base_url, norm, otp_code, nonce_id, chronos_id,
+                extra, state, args.timeout,
+                fp_for(state, args.fp_mode, "verify"), args.password_param)
+            tokens = tokens_from_response(resp_login)
+            if tokens:
+                state["fp_profile"] = dict(FP_PROFILE)   # remember the winner
+                LOG.info("[+] fp profile accepted: order=%s plain=%s",
+                         FP_PROFILE["fp_order"], FP_PROFILE["plain_platform_info"])
+                announce_success(tokens, args.password_param)
+                state["session"] = session_from_tokens(norm, tokens)
+                save_tokens(f"ooredoo_tokens_{norm}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                           norm, tokens)
+                return tokens
+            announce_failure(resp_login)
+            if resp_login.status_code == 401 and cand is not candidates[-1]:
+                LOG.warning("[i] 401 with fp-order=%s/%s — rotating the next "
+                            "device-fingerprint variant …",
+                            cand[0], "plain" if cand[1] else "b64")
+                continue
+            break   # non-401 (or last candidate) → fall back to the prompt loop
         if args.otp:  # non-interactive: no retry loop
             return None
         otp_code = prompt_otp()
@@ -915,13 +1196,19 @@ SHELL_HELP = """
   ping                         POST /api/ooredoo-bff/users/authping (session proof)
 
   POWER OF SNAKE (gamification — features/power_snake module):
-  snakes                       list AVAILABLE cards (GET …/power-snake?status=AVAILABLE)
-  open <n|uuid>                open a card: POST …/power-snake/<uuid>/redeem
-                               (<n> = the # shown by 'snakes'; app verdict:
-                               body.code == 400 => UNLOCKED + reward)
+  autoopen                    THE BYPASS: probe cards under EVERY status, redeem
+                              them ALL (any status), then claim the daily 'play'
+                              gift DIRECTLY (no game) + show status/history.
+                              Works even when the app shows no AVAILABLE cards.
+                              (aliases: harvest, snake)
+  snakes [STATUS|all]         list cards (default AVAILABLE — e.g.
+                              'snakes REDEEMED', 'snakes all' = no filter)
+  open <n|uuid|all>           redeem card(s): POST …/power-snake/<uuid>/redeem
+                              (<n> = the # shown by 'snakes'; app verdict:
+                              body.code == 400 => UNLOCKED + reward)
   game                         gamification/status  {played, lastPlayedTime}
   ghistory                     gamification/history (previous rewards)
-  play                         gamification/play  (daily game — nonce pre-flight)
+  play                         gamification/play  (daily gift — nonce pre-flight)
 
   call METHOD PATH [JSON]      authenticated call, e.g.
                                  call POST /api/ooredoo-bff/users/detect {"msisdn":"213..."}
@@ -960,6 +1247,17 @@ def ensure_live_token(session, args, state, extra) -> bool:
     save_state(args.state_file, state)
     LOG.info("[+] tokens refreshed — new access_token: %s…", tokens["access_token"][:38])
     return True
+
+
+def maybe_autoopen(session, args, state, extra) -> None:
+    """--autoopen hook: run the Power-of-Snake gamification bypass once."""
+    if not getattr(args, "autoopen", False):
+        return
+    LOG.info("[i] --autoopen: running the Power-of-Snake gamification bypass …")
+    if ensure_live_token(session, args, state, extra):
+        snake_autoopen(session, args, state, extra)
+    else:
+        LOG.error("[!] session not usable — autoopen skipped ('relog' to log in).")
 
 
 def session_shell(args, state: dict, extra: dict[str, str],
@@ -1010,9 +1308,14 @@ def session_shell(args, state: dict, extra: dict[str, str],
                                 state["session"]["access_token"],
                                 "POST", EP_AUTHPING, {}, extra, state, args.timeout,
                                 fp_for(state, args.fp_mode, "session"))
+            elif cmd in ("autoopen", "harvest", "snake"):
+                if ensure_live_token(session, args, state, extra):
+                    snake_autoopen(session, args, state, extra)
             elif cmd == "snakes":
                 if ensure_live_token(session, args, state, extra):
-                    snake_list(session, args, state, extra)
+                    st = parts[1] if len(parts) > 1 else "AVAILABLE"
+                    snake_list(session, args, state, extra,
+                               None if st.lower() == "all" else st)
             elif cmd == "open" and len(parts) >= 2:
                 if ensure_live_token(session, args, state, extra):
                     snake_open(session, args, state, extra, parts[1])
@@ -1092,8 +1395,10 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="My Ooredoo 1.5.17 — OTP login + SESSION + POWER-OF-SNAKE client: "
                     "send SMS OTP, verify, KEEP the logged-in state (persisted + "
-                    "resumable), then list/open gamification cards "
-                    "(snakes / open / game / play) with the app's exact protocol.",
+                    "resumable), then list/open gamification cards and run the "
+                    "'autoopen' gamification bypass (probe every card status, redeem "
+                    "all, claim the daily play gift with NO game) — the app's exact "
+                    "wire protocol (v6).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("msisdn", nargs="?", help="MSISDN to log in with. Local/international "
@@ -1108,6 +1413,18 @@ def main() -> None:
                    help="X-Device-Fingerprint stored-msisdn binding: auto = '' on dispatch "
                         "(field-verified) + MSISDN on verify/session (app behavior — v3's "
                         "401 fix); empty = v3 legacy; msisdn = everywhere")
+    p.add_argument("--fp-order", choices=[*FP_ORDERS, "auto"], default="auto",
+                   help="v6: X-Device-Fingerprint HMAC message concatenation order "
+                        "(AOT reading = ts-uuid-msisdn). 'auto' = rotate all 6 orders x "
+                        "2 platform-info encodings on a 401 verify (same OTP) and "
+                        "remember the winner in the state file")
+    p.add_argument("--plain-platform-info", action="store_true",
+                   help="v6 A/B fallback: legacy v4 raw-JSON X-Platform-Info + hex "
+                        "device-id (default: app-faithful base64(utf8(json)) + "
+                        "X-Platform-Data-Signature)")
+    p.add_argument("--autoopen", action="store_true",
+                   help="after login/session-resume: run the Power-of-Snake bypass once "
+                        "(probe every card status, redeem all, claim the daily play gift)")
     p.add_argument("--fresh", action="store_true",
                    help="ignore any saved session and perform a new OTP login")
     p.add_argument("--logout", action="store_true",
@@ -1135,10 +1452,25 @@ def main() -> None:
     setup_logging(args.logfile or f"ooredoo_login_{stamp}.log", args.verbose)
 
     state = load_state(args.state_file)
+    # v6 fingerprint profile precedence: explicit --fp-order > saved winner > AOT default
+    saved_fp = state.get("fp_profile") or {}
+    if args.fp_order != "auto":
+        FP_PROFILE.update(fp_order=args.fp_order,
+                          plain_platform_info=args.plain_platform_info)
+    elif saved_fp.get("fp_order"):
+        FP_PROFILE.update(fp_order=saved_fp["fp_order"],
+                          plain_platform_info=bool(saved_fp.get("plain_platform_info")))
+        LOG.info("[i] using saved fp profile: order=%s plain=%s",
+                 FP_PROFILE["fp_order"], FP_PROFILE["plain_platform_info"])
+    else:
+        FP_PROFILE.update(fp_order=FP_ORDERS[0],
+                          plain_platform_info=args.plain_platform_info)
     banner()
     LOG.info("Base URL     : %s", args.base_url)
     LOG.info("x-signature  : %s%s", X_SIGNATURE[:16] + "…", " (raw variant)" if args.x_sig_raw else "")
-    LOG.info("fp-mode      : %s", args.fp_mode)
+    LOG.info("fp-mode      : %s   fp-order: %s   platform-info: %s",
+             args.fp_mode, FP_PROFILE["fp_order"],
+             "plain-JSON" if FP_PROFILE["plain_platform_info"] else "base64")
     LOG.info("Pseudo-device: instance-id=%s  device-id=%s  (state: %s)",
              state["uuid"], state["device_id"], os.path.abspath(args.state_file))
     if args.proxy:
@@ -1182,6 +1514,7 @@ def main() -> None:
             if args.otp:
                 LOG.info("[i] --otp ignored: session already valid.")
             state["_login_msisdn"] = sess.get("msisdn", "")
+            maybe_autoopen(session, args, state, extra)
             session_shell(args, state, extra, session)
             return
         LOG.info("[i] access token expired — trying refresh_token grant …")
@@ -1189,6 +1522,7 @@ def main() -> None:
         if ok:
             LOG.info("[+] SESSION RESUMED via refresh token.")
             state["_login_msisdn"] = state["session"]["msisdn"]
+            maybe_autoopen(session, args, state, extra)
             session_shell(args, state, extra, session)
             return
         LOG.warning("[!] session expired — falling back to a fresh OTP login.")
@@ -1225,7 +1559,9 @@ def main() -> None:
     if args.otp:
         LOG.info("[i] non-interactive mode: session saved to %s — rerun without "
                  "--otp to resume it.", os.path.abspath(args.state_file))
+        maybe_autoopen(session, args, state, extra)
         return
+    maybe_autoopen(session, args, state, extra)
     session_shell(args, state, extra, session)
 
 

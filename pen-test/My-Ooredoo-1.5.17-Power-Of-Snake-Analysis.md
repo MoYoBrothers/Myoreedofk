@@ -3,7 +3,7 @@
 **Target:** My Ooredoo (Algeria) — `com.algeria.selfcare.app.android` v1.5.17 (1461)
 **Method:** Static analysis — Blutter Dart-AOT disassembly (`libapp.so`), cross-referenced with live mitmproxy captures
 **Scope:** `features/power_snake/**` module + legacy gamification calls in `api/api_calls.dart`
-**Companion client:** `ooredoo_otp_send.py` **[v5]** — commands `snakes`, `open`, `game`, `ghistory`, `play`
+**Companion client:** `ooredoo_otp_send.py` **[v6]** — commands `autoopen` (gamification bypass), `snakes`, `open`, `game`, `ghistory`, `play` + `--autoopen` one-shot flag
 
 ---
 
@@ -216,26 +216,48 @@ CleverTap events: `onPowerSnakeActivation` (success/failed), plus
 
 ---
 
-## 7. Replication checklist (Python client v5)
+## 7. Replication checklist (Python client v6)
 
-Already implemented in `ooredoo_otp_send.py` **[v5]** (session shell):
+Implemented in `ooredoo_otp_send.py` **[v6]** (session shell + one-shot CLI):
 
-| Command | Emits |
-|---------|-------|
-| `snakes` | `GET …/power-snake?status=AVAILABLE` — pretty card table (uuid/status/reward/expiry), caches items |
-| `open <n\|uuid>` | `POST …/power-snake/<uuid>/redeem` (zero-byte body) — applies the `code==400` verdict, prints reward, auto-refreshes the list |
+| Command / flag | Emits |
+|----------------|-------|
+| `autoopen` (aliases `harvest`, `snake`) / `--autoopen` | **THE GAMIFICATION BYPASS**: probes the list endpoint with EVERY status filter (and none), dedupes by uuid, POSTs redeem on EVERY card regardless of status, then claims the daily `play` gift directly (no game) and shows status+history. Runs even when the app shows zero AVAILABLE cards. |
+| `snakes [STATUS\|all]` | `GET …/power-snake?status=<STATUS>` (default AVAILABLE; `all` = no filter) — pretty card table, caches items |
+| `open <n\|uuid\|all>` | `POST …/power-snake/<uuid>/redeem` (zero-byte body) — applies the `code==400` verdict, prints reward, auto-refreshes the list |
 | `game` | `GET …/status` — prints `played` / `lastPlayedTime` |
 | `ghistory` | `GET …/history` |
-| `play` | checkpoint nonce pre-flight (`x-path=…/play, x-method=GET`) then `GET …/play` |
+| `play` | checkpoint nonce pre-flight (`x-path=…/play, x-method=GET`) then `GET …/play` — the daily spin-wheel gift arrives IN THE RESPONSE (`giftName`, `validityHour`; parsed by game_home_screen @ 0xe89df8) |
 
-Header suite per call (exact app parity):
-`User-Agent: Dart/3.11 (dart:io)`, `Accept: application/json`,
-`Content-Type: application/json`, `Authorization: Bearer …`, `x-msisdn`,
-`X-Correlation-ID` (uuid1), `platform: android`, `X-Platform-Origin:
-mobile-android`, `x-version: 1.5.17`, `x-force-update: true`, `x-signature`
-(SHA-256 of `CRC32(dex) + base64(cert) + "\n"`), `X-Platform-Info`,
-`X-Timestamp`, `X-Instance-Id`, `X-Device-Fingerprint`
-(HMAC-SHA256(ts, msisdn+uuid+ts)).
+### 7.1 Why the bypass works ("remove the gamification")
+
+* The **only** card gate is the `?status=AVAILABLE` query parameter the app
+  itself chooses (`getPowerSnakes` @ 0xde9c6c). The BFF serves any other
+  status (or none) to the same endpoint, and `redeem` never re-checks the
+  status — so cards in REDEEMED/EXPIRED/other states can be enumerated and
+  redeem-attempted anyway.
+* The spin-wheel / puzzle-snake / Flarie WebView games are **pure client
+  theater**: the gift is granted by a plain authenticated `GET …/play` with
+  the checkpoint nonce — no score, no session proof is uploaded. Skipping
+  straight to `play` yields the same daily gift.
+* When zero cards exist under all statuses there is nothing to redeem
+  (cards are minted server-side on bundle purchases) — the flow still
+  claims the daily `play` gift.
+
+### 7.2 v6 wire-format corrections (STEP-4 401 suspects)
+
+| Header | v3–v5 (wrong) | v6 (AOT-verified) |
+|---|---|---|
+| `X-Platform-Info` (Keycloak grants, `setDeviceDataGatherForKeycloak` @ 0x95c568) / `X-Platform-Data-Signature` (BFF `_getCommonHeaders` @ 0x92aab4 + module-Dio interceptor) | raw JSON string | **Base64(utf8(json))** (JsonCodec → Utf8Encoder → Base64Codec) |
+| `device-id` inside that payload | random 16-hex token | **Settings 'uuid'** — the exact same value as `X-Instance-Id` (`setUUIdForUser` @ 0x1157168: `Uuid.v1() + epoch-millis`) |
+| `X-Correlation-ID` (`ApiCalls::getXCorrelationId` @ 0x92af84) | bare uuid4 | **`Uuid.v1() + epoch-millis`** |
+| `X-Device-Fingerprint` msg (`SignatureHelper::generateDeviceFingerprint` @ 0x92a630) | `msisdn + uuid + ts` | **`ts + uuid + msisdn`** (key = ts; operand order resolved from the AOT `+`-stub ABI) |
+| Power-snake module Dio headers (interceptor @ 0xb5d128) | full legacy suite incl. x-signature / x-force-update / X-Platform-Info | **no x-signature, no x-force-update, no X-Platform-Info** — only X-Platform-Data-Signature (b64) + fingerprint triplet + platform/x-version |
+
+The client keeps all six fingerprint concatenation orders selectable
+(`--fp-order`, default `auto`): on a 401 verify grant it rotates the orders ×
+the two platform-info encodings with the SAME OTP and persists the winning
+profile in the state file.
 
 ---
 
@@ -279,8 +301,11 @@ mobile-android`, `x-version: 1.5.17`, `x-force-update: true`, `x-signature`
 4. **Full reward metadata leaks pre-open**: the list response embeds each
    card's `assignedReward` *before* redemption — the "surprise" is visible to
    any API client, enabling selective opening of only high-value cards.
+5. **The gamification is entirely optional client-side** (v6 finding): the
+   card gate is a query parameter (`status=AVAILABLE`) and the daily gift is
+   a plain nonce'd GET — no game interaction is required to obtain either.
 
 ---
 
 *Authorized security-testing research artifact — use only against accounts
-you own. Companion log/proof-of-concept: `ooredoo_otp_send.py` v5.*
+you own. Companion log/proof-of-concept: `ooredoo_otp_send.py` v6.*
